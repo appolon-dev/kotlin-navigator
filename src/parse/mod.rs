@@ -1,5 +1,6 @@
 //! tree-sitter parsing: source text → `Tree` → `FileSummary`.
 
+mod java;
 mod kotlin;
 
 use std::cell::RefCell;
@@ -8,10 +9,11 @@ use std::path::{Path, PathBuf};
 use tree_sitter::{Language, Node, Parser, Tree};
 
 use crate::docs::utf16_len;
-use crate::model::{FileSummary, Lang, Span};
+use crate::model::{Decl, DeclKind, FileSummary, Lang, Span};
 
 thread_local! {
     static KOTLIN: RefCell<Parser> = RefCell::new(new_parser(&tree_sitter_kotlin_ng::LANGUAGE.into()));
+    static JAVA: RefCell<Parser> = RefCell::new(new_parser(&tree_sitter_java::LANGUAGE.into()));
 }
 
 fn new_parser(language: &Language) -> Parser {
@@ -23,6 +25,7 @@ fn new_parser(language: &Language) -> Parser {
 pub fn lang_of(path: &Path) -> Option<Lang> {
     match path.extension()?.to_str()? {
         "kt" | "kts" => Some(Lang::Kotlin),
+        "java" => Some(Lang::Java),
         _ => None,
     }
 }
@@ -30,7 +33,7 @@ pub fn lang_of(path: &Path) -> Option<Lang> {
 pub fn parse(lang: Lang, text: &str) -> Tree {
     let parser = match lang {
         Lang::Kotlin => &KOTLIN,
-        Lang::Java => unimplemented!("Java parsing"),
+        Lang::Java => &JAVA,
     };
     // `parse` only returns None without a language, a timeout or a cancellation flag; none are set.
     parser.with_borrow_mut(|p| p.parse(text, None)).expect("parser has a language")
@@ -39,7 +42,7 @@ pub fn parse(lang: Lang, text: &str) -> Tree {
 pub fn summarize(path: PathBuf, lang: Lang, text: &str, tree: &Tree) -> FileSummary {
     match lang {
         Lang::Kotlin => kotlin::summarize(path, text, tree),
-        Lang::Java => unimplemented!("Java parsing"),
+        Lang::Java => java::summarize(path, text, tree),
     }
 }
 
@@ -75,4 +78,22 @@ pub(crate) fn qualify(prefix: &str, name: &str) -> String {
 pub(crate) fn named_child_of_kind<'t>(node: Node<'t>, kind: &str) -> Option<Node<'t>> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor).find(|c| c.kind() == kind)
+}
+
+/// Collects declarations of one file, building FQNs from the package and container chain.
+pub(crate) struct DeclSink<'a> {
+    pub text: &'a str,
+    pub package: &'a str,
+    pub decls: Vec<Decl>,
+}
+
+impl DeclSink<'_> {
+    /// Adds a declaration named by `name_node` (or `fixed_name`) and returns its index.
+    pub fn push(&mut self, name_node: Node, fixed_name: Option<&str>, kind: DeclKind, container: Option<u32>) -> u32 {
+        let name = fixed_name.map_or_else(|| ident_text(self.text, name_node), str::to_string);
+        let prefix = container.map_or(self.package, |c| self.decls[c as usize].fqn.as_str());
+        let fqn = qualify(prefix, &name);
+        self.decls.push(Decl { name, fqn, kind, container, name_range: span_of(self.text, name_node) });
+        (self.decls.len() - 1) as u32
+    }
 }
