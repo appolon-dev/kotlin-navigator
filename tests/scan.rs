@@ -1,0 +1,39 @@
+use kotlin_navigator::scan::{build_index, walk_sources};
+use std::{fs, path::Path};
+
+fn write(root: &Path, rel: &str, bytes: &[u8]) {
+    let p = root.join(rel);
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(p, bytes).unwrap();
+}
+
+#[test]
+fn walk_skips_ignored_hidden_build_and_large_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = dir.path();
+    write(r, "app/src/main/A.kt", b"class A");
+    write(r, "app/src/main/B.java", b"class B {}");
+    write(r, "app/build.gradle.kts", b"plugins {}");
+    write(r, ".claude/worktrees/w1/app/A.kt", b"class A");
+    for d in ["build", "out", "target", "bin", "node_modules", "generated"] {
+        write(r, &format!("lib/{d}/X.kt"), b"class X");
+    }
+    write(r, ".gitignore", b"ignored/\n");
+    write(r, "ignored/I.kt", b"class I");
+    write(r, "big/Big.kt", &vec![b' '; 2 * 1024 * 1024 + 1]);
+    let found: Vec<String> = walk_sources(&[r.to_path_buf()]).iter()
+        .map(|p| p.strip_prefix(r).unwrap().to_string_lossy().into_owned()).collect();
+    assert_eq!(found, vec!["app/src/main/A.kt", "app/src/main/B.java"]);
+}
+
+#[test]
+fn build_index_skips_non_utf8_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = dir.path();
+    write(r, "a/A.kt", b"package a\nclass A\n");
+    write(r, "a/Bad.kt", b"class \xff\xfe Bad\n");
+    let (idx, stats) = build_index(&[r.to_path_buf()]);
+    assert_eq!((stats.files, stats.skipped), (1, 1));
+    assert_eq!(idx.lookup("A").len(), 1);
+    assert_eq!(idx.file_count(), 1);
+}
