@@ -1,0 +1,12 @@
+[package]
+name = "kotlin-navigator-zed"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/appolon-dev/kotlin-navigator"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"

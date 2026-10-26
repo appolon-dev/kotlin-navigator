@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 /target/
 .DS_Store
+/zed-extension/target/
+/zed-extension/*.wasm
+/dist/
