@@ -175,50 +175,74 @@ fn function(sink: &mut DeclSink, node: Node, container: Option<u32>) -> bool {
 
 /// One `Property` per declared variable; `val (a, b) = …` declares two.
 fn property(sink: &mut DeclSink, node: Node, container: Option<u32>) -> bool {
-    let mut cursor = node.walk();
-    let children: Vec<Node> = node.children(&mut cursor).collect();
-    let Some(at) = children.iter().position(|c| matches!(c.kind(), "variable_declaration" | "multi_variable_declaration"))
-    else {
-        return false;
-    };
-    let receiver = receiver_before(sink.text, node, children[at].start_byte());
+    let vars = variables(sink.text, node);
+    let Some(first) = vars.first() else { return false };
+    let receiver = receiver_before(sink.text, node, first.name.start_byte());
     let flags = modifier_flags(sink.text, node);
-    // `val r = Repo(x)`: the initializer is the named node right after `=`.
-    let call_hint = match children[at + 1..] {
-        [eq, init, ..] if eq.kind() == "=" && children[at].kind() == "variable_declaration" => call_type(sink.text, init),
-        _ => None,
-    };
-    let vars = if children[at].kind() == "variable_declaration" {
-        vec![children[at]]
-    } else {
-        let mut cursor = children[at].walk();
-        children[at].named_children(&mut cursor).filter(|v| v.kind() == "variable_declaration").collect()
-    };
     for var in vars {
-        let Some(name) = named_child_of_kind(var, "identifier") else { continue };
-        let index = sink.push(name, None, DeclKind::Property, container) as usize;
+        let index = sink.push(var.name, None, DeclKind::Property, container) as usize;
         let decl = &mut sink.decls[index];
         decl.receiver = receiver.clone();
         decl.flags = flags;
-        decl.type_hint = type_child(sink.text, var);
-        if decl.type_hint.is_none() && call_hint.is_some() {
-            decl.type_hint = call_hint.clone();
+        decl.type_hint = var.type_name;
+        if var.from_call {
             decl.flags.insert(Flags::CALL_HINT);
         }
     }
     true
 }
 
+/// A variable declared by a `property_declaration` or `when_subject`.
+pub(crate) struct Variable<'t> {
+    pub name: Node<'t>,
+    pub type_name: Option<String>,
+    /// The type was taken from the initializer `Repo(x)`, not written out.
+    pub from_call: bool,
+}
+
+/// The variables of `val x: T = …`, `val r = Repo(x)` or `val (a, b) = …`.
+pub(crate) fn variables<'t>(text: &str, node: Node<'t>) -> Vec<Variable<'t>> {
+    let mut cursor = node.walk();
+    let children: Vec<Node> = node.children(&mut cursor).collect();
+    let Some(at) = children.iter().position(|c| matches!(c.kind(), "variable_declaration" | "multi_variable_declaration"))
+    else {
+        return Vec::new();
+    };
+    // `val r = Repo(x)`: the initializer is the named node right after `=`.
+    let call_hint = match children[at + 1..] {
+        [eq, init, ..] if eq.kind() == "=" && children[at].kind() == "variable_declaration" => call_type(text, init),
+        _ => None,
+    };
+    declared(children[at])
+        .into_iter()
+        .filter_map(|var| {
+            let name = named_child_of_kind(var, "identifier")?;
+            let written = type_child(text, var);
+            let from_call = written.is_none() && call_hint.is_some();
+            Some(Variable { name, type_name: written.or_else(|| call_hint.clone()), from_call })
+        })
+        .collect()
+}
+
+/// The `variable_declaration`s of a `variable_declaration` or `multi_variable_declaration`.
+pub(crate) fn declared(node: Node) -> Vec<Node> {
+    if node.kind() == "variable_declaration" {
+        return vec![node];
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).filter(|v| v.kind() == "variable_declaration").collect()
+}
+
 const TYPES: [&str; 4] = ["user_type", "nullable_type", "parenthesized_type", "function_type"];
 
 /// The name of the first type node among `node`'s children.
-fn type_child(text: &str, node: Node) -> Option<String> {
+pub(crate) fn type_child(text: &str, node: Node) -> Option<String> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor).find(|c| TYPES.contains(&c.kind())).and_then(|t| type_name(text, t))
 }
 
 /// The receiver type of an extension: a type child before the declared name.
-fn receiver_before(text: &str, node: Node, name_start: usize) -> Option<String> {
+pub(crate) fn receiver_before(text: &str, node: Node, name_start: usize) -> Option<String> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor)
         .take_while(|c| c.start_byte() < name_start)

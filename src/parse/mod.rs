@@ -3,6 +3,8 @@
 mod java;
 mod kotlin;
 
+pub(crate) use kotlin::{declared, receiver_before, type_child, variables};
+
 use std::cell::RefCell;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
