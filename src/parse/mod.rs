@@ -4,6 +4,7 @@ mod java;
 mod kotlin;
 
 use std::cell::RefCell;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use tree_sitter::{Language, Node, Parser, Tree};
@@ -61,6 +62,14 @@ pub(crate) fn span_of(text: &str, node: Node) -> Span {
     Span { line: pos.row as u32, start, end }
 }
 
+/// The span of `text[range]`, for a token found without a tree node.
+pub(crate) fn span_at(text: &str, range: Range<usize>) -> Span {
+    let line_start = text[..range.start].rfind('\n').map_or(0, |i| i + 1);
+    let line = text.as_bytes()[..line_start].iter().filter(|&&b| b == b'\n').count() as u32;
+    let start = utf16_len(&text[line_start..range.start]);
+    Span { line, start, end: start + utf16_len(&text[range]) }
+}
+
 /// Identifier text without Kotlin backticks.
 pub(crate) fn ident_text(text: &str, node: Node) -> String {
     text[node.byte_range()].trim_matches('`').to_string()
@@ -95,9 +104,19 @@ impl DeclSink<'_> {
     /// Adds a declaration named by `name_node` (or `fixed_name`) and returns its index.
     pub fn push(&mut self, name_node: Node, fixed_name: Option<&str>, kind: DeclKind, container: Option<u32>) -> u32 {
         let name = fixed_name.map_or_else(|| ident_text(self.text, name_node), str::to_string);
+        self.add(name, span_of(self.text, name_node), kind, container)
+    }
+
+    /// Like `push`, for a name token at `text[range]` that has no tree node.
+    pub fn push_range(&mut self, fixed_name: Option<&str>, range: Range<usize>, kind: DeclKind, container: Option<u32>) -> u32 {
+        let name = fixed_name.map_or_else(|| self.text[range.clone()].trim_matches('`').to_string(), str::to_string);
+        self.add(name, span_at(self.text, range), kind, container)
+    }
+
+    fn add(&mut self, name: String, name_range: Span, kind: DeclKind, container: Option<u32>) -> u32 {
         let prefix = container.map_or(self.package, |c| self.decls[c as usize].fqn.as_str());
         let fqn = qualify(prefix, &name);
-        self.decls.push(Decl { name, fqn, kind, container, name_range: span_of(self.text, name_node) });
+        self.decls.push(Decl { name, fqn, kind, container, name_range });
         (self.decls.len() - 1) as u32
     }
 }

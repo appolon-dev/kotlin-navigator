@@ -59,3 +59,29 @@ fn broken_syntax_keeps_recognized_decls() {
     assert!(s.has_errors);
     assert!(s.decls.iter().any(|d| d.fqn == "Good"));
 }
+
+#[test]
+fn annotated_top_level_soft_keyword_declarations() {
+    // tree-sitter-kotlin-ng reads these as `annotated_expression` without any ERROR node.
+    let text = "package p\n@Retention(AnnotationRetention.BINARY)\nannotation class A\n@Serializable\ndata object D\n@Serializable\nenum class E { X }\n";
+    assert_eq!(fqns(text), v(&[("p.A", Class), ("p.D", Object), ("p.E", Enum), ("p.E.X", EnumEntry)]));
+    assert_eq!(summary(text).decls[0].name_range, Span { line: 2, start: 17, end: 18 });
+}
+
+#[test]
+fn grammar_error_inside_class_body_keeps_class_and_fqns() {
+    // Two `data object X : T() { override ... }` members in a row make the grammar emit one flat ERROR node.
+    let text = "package p\nsealed class T {\n    data object A : T() { override val raw = \"a\" }\n\n    data object B : T() { override val raw = \"b\" }\n    companion object {\n        fun f() {\n            class Local\n        }\n    }\n}\nclass After\n";
+    assert_eq!(fqns(text), v(&[("p.T", Class), ("p.T.A", Object), ("p.T.B", Object), ("p.T.Companion", Object), ("p.After", Class)]));
+    let spans: Vec<Span> = summary(text).decls.iter().map(|d| d.name_range).collect();
+    assert_eq!(spans[2..], [Span { line: 4, start: 16, end: 17 }, Span { line: 5, start: 4, end: 13 }, Span { line: 11, start: 6, end: 11 }]);
+}
+
+#[test]
+fn whole_file_parsed_as_error_keeps_declarations() {
+    // A parameter named after the soft keyword `override` makes the root itself an ERROR node.
+    let text = "package p\ninternal object E {\n    fun f(s: Any, override: Any?): Any? = when (s) {\n        is String -> override as? String\n    }\n}\n";
+    let s = summary(text);
+    assert_eq!(s.package, "p");
+    assert_eq!(fqns(text), v(&[("p.E", Object)]));
+}
