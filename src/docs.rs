@@ -1,8 +1,13 @@
 //! Positions (LSP UTF-16 columns <-> byte offsets) and file URIs.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use lsp_types::Uri;
+use tree_sitter::Tree;
+
+use crate::model::FileSummary;
+use crate::parse;
 
 pub fn utf16_len(s: &str) -> u32 {
     s.chars().map(|c| c.len_utf16() as u32).sum()
@@ -39,6 +44,39 @@ pub fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
         return None;
     }
     url.to_file_path().ok()
+}
+
+/// An editor buffer: its unsaved text wins over the file on disk.
+pub struct OpenDoc {
+    pub text: String,
+    pub tree: Tree,
+    pub summary: FileSummary,
+}
+
+#[derive(Default)]
+pub struct Documents {
+    docs: HashMap<PathBuf, OpenDoc>,
+}
+
+impl Documents {
+    /// Parses and stores the buffer; `None` for languages we do not parse.
+    pub fn set(&mut self, path: PathBuf, text: String) -> Option<&OpenDoc> {
+        let (tree, summary) = parse::summarize_text(path.clone(), &text)?;
+        self.docs.insert(path.clone(), OpenDoc { text, tree, summary });
+        self.docs.get(&path)
+    }
+
+    pub fn close(&mut self, path: &Path) -> Option<OpenDoc> {
+        self.docs.remove(path)
+    }
+
+    pub fn get(&self, path: &Path) -> Option<&OpenDoc> {
+        self.docs.get(path)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &OpenDoc> {
+        self.docs.values()
+    }
 }
 
 #[cfg(test)]
