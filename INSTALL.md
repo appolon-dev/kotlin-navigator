@@ -5,8 +5,8 @@ Kotlin Navigator comes as a Zed dev extension. The extension downloads the prebu
 ## 1. Requirements
 
 - macOS on Apple Silicon or Intel.
-- [Zed](https://zed.dev).
-- Rust installed with **rustup** (<https://rustup.rs>). Zed needs it only to compile the small extension and adds the `wasm32-wasip2` target itself. A Rust from Homebrew does not build dev extensions.
+- [Zed](https://zed.dev) 0.205 or newer.
+- Rust 1.85 or newer installed with **rustup** (<https://rustup.rs>); if yours is older, run `rustup update`. Zed needs it only to compile the small extension and adds the `wasm32-wasip2` target itself. A Rust from Homebrew does not build dev extensions.
 
 ## 2. Zed extensions
 
@@ -22,7 +22,7 @@ In Zed, run `zed: install dev extension` from the command palette (`Cmd + Shift 
 
 ## 4. Settings
 
-Merge this into `~/.config/zed/settings.json` (`Cmd + ,`), next to your other settings:
+Run `zed: open settings file` from the command palette (it opens `~/.config/zed/settings.json`) and merge this next to your other settings:
 
 ```json
 {
@@ -56,6 +56,8 @@ Kotlin Navigator comes first, so Zed asks it for Go to Definition. The JVM langu
 
 - **`Kotlin Navigator: could not download the navigator (…). Put kotlin-navigator on PATH or set lsp.kotlin-navigator.binary.path.`** The first download failed: no network, GitHub's API limit (60 requests an hour per address), or downloads blocked. Once one version is downloaded, the extension falls back to it while offline. If you restricted `granted_extension_capabilities`, allow `download_file` from `github.com`.
 - **`Kotlin Navigator: no prebuilt binary for … . Put kotlin-navigator on PATH or set lsp.kotlin-navigator.binary.path.`** Releases exist for macOS only. Build the navigator yourself (see the README) and point to it as below.
+- **`feature edition2024 is required` when installing the extension.** Your Rust is older than 1.85: run `rustup update`, then install the dev extension again.
+- **Where the download lives:** `~/Library/Application Support/Zed/extensions/work/kotlin-navigator/kotlin-navigator-<version>/`.
 - **Your own build.** `binary.path` wins over the download; `kotlin-navigator` on your `PATH` wins too:
 
   ```json
@@ -70,7 +72,7 @@ If you used Kotlin Navigator through the `kotlin-language-server` binary overrid
 
 1. Remove the `"kotlin-language-server": { "binary": … }` block from `lsp` in your settings.
 2. Replace your `languages.Kotlin.language_servers` with the snippet of step 4.
-3. Optionally delete `~/.local/share/kotlin-navigator`.
+3. Optionally delete `~/.local/share/kotlin-navigator`. It also holds `navigator.py`, the Python version that the README's rollback uses.
 
 ## 9. Uninstalling
 

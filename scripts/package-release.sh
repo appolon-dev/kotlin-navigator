@@ -15,6 +15,8 @@ cd "$(dirname "$0")/.."
 
 version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
 [[ "$tag" == "v$version" || "$tag" == "v$version-"* ]] || die "tag $tag does not match Cargo.toml version $version"
+# A version bump without its Cargo.lock would fail every --locked step below.
+cargo metadata --locked --format-version 1 > /dev/null 2>&1 || die "Cargo.lock does not match Cargo.toml: run cargo test and commit Cargo.lock"
 
 targets=(aarch64-apple-darwin x86_64-apple-darwin)
 cargo test --locked

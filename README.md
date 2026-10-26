@@ -91,14 +91,14 @@ Two legacy tests fail on macOS because the prototype resolves `/var` to `/privat
 
 ## Releasing
 
-1. Bump `version` in `Cargo.toml` and commit.
+1. Bump `version` in `Cargo.toml`, run `cargo test` (it updates `Cargo.lock`) and commit both files.
 2. `git tag vX.Y.Z && git push origin vX.Y.Z`. The `release` workflow (`.github/workflows/release.yml`) runs the tests, builds `aarch64-apple-darwin` and `x86_64-apple-darwin` for macOS 11 and later, and publishes `kotlin-navigator-<target>.tar.gz` with a `.sha256` for each. Users get it on their next Zed start.
 
 A tag with a suffix (`vX.Y.Z-rc.1`) becomes a pre-release, which the extension skips: download it by hand to check a build before everyone gets it. `scripts/package-release.sh <tag>` runs the same build and checks locally and leaves the archives in `dist/`.
 
 ## Rolling back to Python
 
-`install.sh` leaves `~/.local/share/kotlin-navigator/navigator.py` in place. Remove `kotlin-navigator` and `!kotlin-language-server` from `language_servers` and point `lsp.kotlin-language-server.binary.path` back to `python3` with `"arguments": ["-u", "/Users/YOU/.local/share/kotlin-navigator/navigator.py"]`; `legacy/install.sh` reinstalls it.
+`install.sh` leaves `~/.local/share/kotlin-navigator/navigator.py` in place. Uninstall the Kotlin Navigator extension (or put `!kotlin-navigator` in place of `kotlin-navigator` in `language_servers`), drop `!kotlin-language-server` and point `lsp.kotlin-language-server.binary.path` back to `python3` with `"arguments": ["-u", "/Users/YOU/.local/share/kotlin-navigator/navigator.py"]`; `legacy/install.sh` reinstalls it.
 
 ## License
 
