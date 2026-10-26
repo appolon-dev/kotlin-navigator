@@ -2,15 +2,20 @@
 
 A small language server for **Go to Definition across modules in large Kotlin/Java (Android, KMP) projects**. It never runs Gradle, the Kotlin compiler, a JVM or Android Studio: it parses sources with tree-sitter and keeps a compact declaration index in memory.
 
-This is **stage 1** of the Rust rewrite (design: `docs/superpowers/specs/2026-10-25-rust-navigator-design.md`). It reaches parity with the original Python prototype, now kept in `legacy/`.
+This is **stage 2** of the Rust rewrite (designs: `docs/superpowers/specs/2026-10-25-rust-navigator-design.md`, `docs/superpowers/specs/2026-10-26-rust-navigator-stage2-design.md`). Stage 1 reached parity with the original Python prototype, now kept in `legacy/`; stage 2 adds members and locals.
 
-## What stage 1 does
+## What it does
 
 - `textDocument/definition` for class-like symbols: classes of every kind, interfaces (incl. `fun interface`), objects, companion objects, enum classes and their entries, type aliases, Java records and annotation types. Nested classes (`Outer.Inner`) are resolved through their full name.
-- Candidate ranking: an explicit import (incl. `as` aliases), then the same file, the same package, wildcard imports; otherwise all candidates (up to 50). Clicking inside an `import` line jumps to exactly that class.
+- Go to functions, properties, parameters and local variables (incl. `it`, `for`/`catch`/`when` variables and destructuring); top-level functions and properties are found across modules and through their imports.
+- The type of a receiver comes from a declared type (`val repo: Repo?`) or a constructor call (`val r = Repo(x)`). `repo.load()`, `Foo.create()` (companion), `this.x`, `super.x` and `x?.y` look among the type's members, then its supertypes (5 levels deep), then extension functions and properties declared on them.
+- Source sets and Gradle modules come from the path: `androidMain` code is not sent to an `iosMain` declaration while a compatible one exists, same-module candidates come first, `internal` ones of other modules last.
+- `expect`/`actual`: an `expect` brings its `actual`s, the one for the current source set first.
+- Candidate ranking: an explicit import (incl. `as` aliases), then the same file, the same package, wildcard imports; otherwise all candidates (up to 50). `private` declarations of other files are never offered. Clicking inside an `import` line jumps to exactly that declaration.
 - `workspace/symbol`: case-insensitive substring search, exact and prefix matches first, up to 100 results.
 - Unsaved buffers win over files on disk (`didOpen`, full-sync `didChange`); `didClose`, `didSave` and `workspace/didChangeWatchedFiles` refresh from disk. An open `build.gradle.kts` can navigate but is not indexed.
-- The workspace walk honours `.gitignore`, `.ignore`, `.git/info/exclude` and the global gitignore, skips hidden directories (so `.claude/worktrees` is not indexed) and `build`, `out`, `target`, `bin`, `node_modules`, `generated`, plus files over 2 MB. Files tracked by git are always indexed, even if an ignore rule matches them.
+- The workspace walk honours `.gitignore`, `.ignore`, `.git/info/exclude` and the global gitignore, skips hidden directories (so `.claude/worktrees` is not indexed) and `build`, `out`, `target`, `bin`, `node_modules`, `generated`, plus files over 2 MB. Files tracked by git are indexed even if an ignore rule matches them, except inside `build`, `out` and the other always-skipped directories.
+- While the first scan runs, requests are answered from the part indexed so far once 10 s have passed; a crash in the scan still lets requests through.
 
 ## Install on macOS
 
@@ -41,10 +46,13 @@ This is **stage 1** of the Rust rewrite (design: `docs/superpowers/specs/2026-10
 
 This uses Zed's per-server binary override to run the navigator under the ID of the Kotlin extension's language server.
 
-## Limitations of stage 1
+## Limitations
 
-- Only class-like symbols. Functions, properties, parameters and locals, Find Usages, an on-disk cache and file-watch registration come in later stages.
-- No type inference, overload resolution, Gradle variant graph, generated sources or classes from AAR/JAR dependencies. An explicitly imported class that is not in the workspace (a library class) yields no result rather than a same-named project class.
+- No type inference, generics or call chains: `foo().bar` and `it.bar` fall back to a ranked search by name. Overloads are not told apart: every `load(…)` of a class is offered.
+- Named arguments and lambdas with receivers (`apply {}`, `with(x) {}`) are not resolved; they fall back to the search by name.
+- No synthetic properties for Java getters (`getFoo()` as `foo`). From Java files, members are found by name with ranking only.
+- No Gradle variant graph, generated sources or classes from AAR/JAR dependencies. An explicitly imported declaration that is not in the workspace (a library class) yields no result rather than a same-named project one.
+- Find Usages, `$/cancelRequest`, an on-disk cache and file-watch registration come in later stages.
 
 ## Diagnostics
 
@@ -56,15 +64,20 @@ Logs go to stderr; view them with `Cmd + Shift + P` → `dev: open language serv
 
 ## Benchmark
 
-`kotlin-navigator --bench <root>` indexes `<root>` once and prints file and declaration counts, files with parse errors, cold indexing time and peak memory.
+`kotlin-navigator --bench <root>` indexes `<root>` once and prints file and declaration counts, files with parse errors, cold indexing time and peak memory. Then it runs Go to Definition on 1 000 identifiers picked at random (fixed seed 42) from the indexed Kotlin files and prints the share of lookups with no, one and several targets, and the median and 95th-percentile lookup time.
 
 Measured on a real KMP project (2026-10-26, Apple Silicon, 10 cores):
 
-| | Python prototype | Rust, stage 1 |
-|---|---|---|
-| files indexed | 42 150 (walked into 18 git worktrees) | 4 924 |
-| cold index | 34.8 s | 0.75–1.3 s |
-| peak memory | 147 MB | 32–34 MB |
+| | Python prototype | Rust, stage 1 | Rust, stage 2 |
+|---|---|---|---|
+| files indexed | 42 150 (walked into 18 git worktrees) | 4 924 | 4 924 |
+| declarations | | | 47 530 |
+| cold index | 34.8 s | 0.75–1.3 s | 0.83–1.24 s |
+| peak memory | 147 MB | 32–34 MB | 55–61 MB (incl. sampling) |
+| unambiguous definition (one target) | | | 57.5 % (none: 35.7 %, several: 6.8 %) |
+| definition time, p50 / p95 | | | 16 µs / 60–62 µs |
+
+Most lookups without a target are library and generated names (`String`, `Serializable`, `Modifier`, DI DSL functions such as `single`, generated database and resource classes) and `null`/`true`/`false`, which the grammar reports as identifiers.
 
 ## Tests
 

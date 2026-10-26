@@ -85,4 +85,7 @@ fn bench_prints_report() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.starts_with("files: 1\nskipped: 0\ndecls: 2\nparse_error_files: 0\ncold_index_ms: "));
     assert!(text.contains("\npeak_rss_mb: "));
+    assert!(text.contains("\ndefinition_samples: 1000\n"));
+    assert!(text.contains("\ndefinition_one_pct: "));
+    assert!(text.contains("\ndefinition_p95_us: "));
 }

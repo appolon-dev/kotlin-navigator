@@ -55,6 +55,10 @@ impl Index {
         found
     }
 
+    pub fn files(&self) -> impl Iterator<Item = &FileSummary> {
+        self.files.values().map(Arc::as_ref)
+    }
+
     pub fn decls(&self) -> impl Iterator<Item = (&FileSummary, &Decl)> {
         self.files.values().flat_map(|f| f.decls.iter().map(move |d| (f.as_ref(), d)))
     }
