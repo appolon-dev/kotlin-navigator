@@ -26,32 +26,64 @@ fn ordered(mut list: Vec<DeclRef>) -> Vec<DeclRef> {
     list
 }
 
-/// Direct and indirect subtypes of `class`, without `class` itself.
-pub fn subtypes<'a>(index: &'a Index, class: DeclRef<'a>, cancel: &Cancel) -> Result<Vec<DeclRef<'a>>, Cancelled> {
-    // Last segment of a written supertype -> the classes that name it.
-    let mut heirs: HashMap<&str, Vec<DeclRef<'a>>> = HashMap::new();
-    for (file, decl) in index.decls().filter(|(_, d)| d.kind.is_class_like()) {
-        for written in &decl.supertypes {
-            heirs.entry(written.rsplit('.').next().unwrap_or(written)).or_default().push((file, decl));
-        }
-    }
-    let mut seen: HashSet<Key> = HashSet::from([key(class)]);
-    let mut queue = VecDeque::from([class]);
-    let mut found = Vec::new();
-    while let Some(current) = queue.pop_front() {
-        cancel.check()?;
-        let (current_file, current_decl) = current;
-        for &(file, decl) in heirs.get(current_decl.name.as_str()).into_iter().flatten() {
-            let names_current = decl.supertypes.iter().filter(|w| w.rsplit('.').next() == Some(current_decl.name.as_str())).any(|w| {
-                resolve_type(index, file, w).iter().any(|&r| key(r) == key((current_file, current_decl)))
-            });
-            if names_current && seen.insert(key((file, decl))) {
-                found.push((file, decl));
-                queue.push_back((file, decl));
+/// Subtype search over one index: the map of heirs is built once, subtypes once per class.
+struct Hierarchy<'a> {
+    index: &'a Index,
+    /// Last segment of a written supertype -> the classes that name it.
+    heirs: HashMap<&'a str, Vec<DeclRef<'a>>>,
+    cache: HashMap<Key, Vec<DeclRef<'a>>>,
+}
+
+impl<'a> Hierarchy<'a> {
+    fn new(index: &'a Index) -> Self {
+        let mut heirs: HashMap<&str, Vec<DeclRef<'a>>> = HashMap::new();
+        for (file, decl) in index.decls().filter(|(_, d)| d.kind.is_class_like()) {
+            for written in &decl.supertypes {
+                heirs.entry(written.rsplit('.').next().unwrap_or(written)).or_default().push((file, decl));
             }
         }
+        Hierarchy { index, heirs, cache: HashMap::new() }
     }
-    Ok(ordered(found))
+
+    fn subtypes(&mut self, class: DeclRef<'a>, cancel: &Cancel) -> Result<Vec<DeclRef<'a>>, Cancelled> {
+        if let Some(done) = self.cache.get(&key(class)) {
+            return Ok(done.clone());
+        }
+        let mut seen: HashSet<Key> = HashSet::from([key(class)]);
+        let mut queue = VecDeque::from([class]);
+        let mut found = Vec::new();
+        while let Some(current) = queue.pop_front() {
+            cancel.check()?;
+            let (current_file, current_decl) = current;
+            for &(file, decl) in self.heirs.get(current_decl.name.as_str()).into_iter().flatten() {
+                let names_current = decl.supertypes.iter().filter(|w| w.rsplit('.').next() == Some(current_decl.name.as_str())).any(|w| {
+                    resolve_type(self.index, file, w).iter().any(|&r| key(r) == key((current_file, current_decl)))
+                });
+                if names_current && seen.insert(key((file, decl))) {
+                    found.push((file, decl));
+                    queue.push_back((file, decl));
+                }
+            }
+        }
+        let found = ordered(found);
+        self.cache.insert(key(class), found.clone());
+        Ok(found)
+    }
+
+    /// Overrides named `name` in the subtypes of `class`.
+    fn overrides(&mut self, class: DeclRef<'a>, name: &str, cancel: &Cancel) -> Result<Vec<DeclRef<'a>>, Cancelled> {
+        Ok(self
+            .subtypes(class, cancel)?
+            .into_iter()
+            .flat_map(|(f, c)| own_members(f, c, name, false))
+            .filter(|(_, d)| d.flags.contains(Flags::OVERRIDE))
+            .collect())
+    }
+}
+
+/// Direct and indirect subtypes of `class`, without `class` itself.
+pub fn subtypes<'a>(index: &'a Index, class: DeclRef<'a>, cancel: &Cancel) -> Result<Vec<DeclRef<'a>>, Cancelled> {
+    Hierarchy::new(index).subtypes(class, cancel)
 }
 
 fn is_pair(decl: &Decl) -> bool {
@@ -63,18 +95,10 @@ fn owner<'a>(file: &'a FileSummary, decl: &Decl) -> Option<DeclRef<'a>> {
     container(file, decl).filter(|c| c.kind.is_class_like()).map(|c| (file, c))
 }
 
-/// Overrides of the member `decl` named like it in the subtypes of its class.
-fn overrides<'a>(index: &'a Index, class: DeclRef<'a>, name: &str, cancel: &Cancel) -> Result<Vec<DeclRef<'a>>, Cancelled> {
-    Ok(subtypes(index, class, cancel)?
-        .into_iter()
-        .flat_map(|(f, c)| own_members(f, c, name, false))
-        .filter(|(_, d)| d.flags.contains(Flags::OVERRIDE))
-        .collect())
-}
-
 /// `decl` with everything it overrides, everything overriding it, and its expect/actual
 /// counterparts.
 pub fn family<'a>(index: &'a Index, decl: DeclRef<'a>, cancel: &Cancel) -> Result<Vec<DeclRef<'a>>, Cancelled> {
+    let mut hierarchy = Hierarchy::new(index);
     let mut seen: HashSet<Key> = HashSet::from([key(decl)]);
     let mut work = vec![decl];
     let mut all = vec![decl];
@@ -86,7 +110,7 @@ pub fn family<'a>(index: &'a Index, decl: DeclRef<'a>, cancel: &Cancel) -> Resul
                 let ty = Ty { name: class.1.name.clone(), decls: vec![class] };
                 related.extend(supertype_members(index, &ty, &d.name).0);
             }
-            related.extend(overrides(index, class, &d.name, cancel)?);
+            related.extend(hierarchy.overrides(class, &d.name, cancel)?);
         }
         if is_pair(d) {
             related.extend(by_fqn(index, &d.fqn).into_iter().filter(|(_, o)| is_pair(o)));
@@ -105,10 +129,11 @@ pub fn family<'a>(index: &'a Index, decl: DeclRef<'a>, cancel: &Cancel) -> Resul
 /// actuals of an `expect`.
 pub fn implementations<'a>(index: &'a Index, decl: DeclRef<'a>, cancel: &Cancel) -> Result<Vec<DeclRef<'a>>, Cancelled> {
     let (file, d) = decl;
+    let mut hierarchy = Hierarchy::new(index);
     let mut found = if d.kind.is_class_like() {
-        subtypes(index, decl, cancel)?
+        hierarchy.subtypes(decl, cancel)?
     } else if let Some(class) = owner(file, d) {
-        overrides(index, class, &d.name, cancel)?
+        hierarchy.overrides(class, &d.name, cancel)?
     } else {
         Vec::new()
     };
