@@ -132,3 +132,106 @@ fn mem(files: &[(&str, &str)], from: &str, line: usize, needle: &str) -> Vec<Str
         assert_eq!(mem(&files, "/ws/U.kt", line, "load"), vec!["/ws/R.kt:1"], "line {line}");
     }
 }
+
+#[test]
+fn aliased_receiver_finds_its_extension() {
+    let files = [("/ws/R.kt", "package p\nclass Repo\n"),
+                 ("/ws/E.kt", "package p\nfun Repo.extra() {}\n"),
+                 ("/ws/U.kt", "package u\nimport p.Repo as MyRepo\nimport p.extra\nfun f(x: MyRepo) { x.extra() }\n")];
+    assert_eq!(mem(&files, "/ws/U.kt", 3, "extra"), ["/ws/E.kt:1"]);
+}
+
+#[test]
+fn unrelated_receiver_with_the_same_name_has_no_extension() {
+    let files = [("/ws/E.kt", "package q\nclass Repo\nfun Repo.extra() {}\n"),
+                 ("/ws/U.kt", "package p\nimport q.extra\nclass Repo\nfun f(x: Repo) { x.extra() }\n")];
+    assert!(mem(&files, "/ws/U.kt", 3, "extra").is_empty());
+}
+
+#[test]
+fn nested_type_outside_its_scope_does_not_hide_a_package_type() {
+    let files = [("/ws/R.kt", "package p\nclass Right { fun go() {} }\n"),
+                 ("/ws/U.kt", "package p\nclass Outer {\n  class Right { fun wrong() {} }\n}\nfun f(x: Right) { x.go() }\n")];
+    assert_eq!(mem(&files, "/ws/U.kt", 4, "go"), ["/ws/R.kt:1"]);
+}
+
+#[test]
+fn nested_receiver_type_is_visible_inside_its_owner() {
+    let files = [("/ws/R.kt", "package p\nclass Right { fun other() {} }\n"),
+                 ("/ws/U.kt", "package p\nclass Outer {\n  class Right { fun go() {} }\n  fun f(x: Right) { x.go() }\n}\n")];
+    assert_eq!(mem(&files, "/ws/U.kt", 3, "go"), ["cur.kt:2"]);
+}
+
+#[test]
+fn extension_receiver_alias_is_resolved_in_the_extension_file() {
+    let files = [("/ws/R.kt", "package p\nclass Repo\n"),
+                 ("/ws/E.kt", "package e\nimport p.Repo as R\nfun R.extra() {}\n"),
+                 ("/ws/U.kt", "package u\nimport p.Repo\nimport e.extra\nfun f(x: Repo) { x.extra() }\n")];
+    assert_eq!(mem(&files, "/ws/U.kt", 3, "extra"), ["/ws/E.kt:2"]);
+}
+
+#[test]
+fn extension_of_an_aliased_supertype_is_found() {
+    let files = [("/ws/B.kt", "package p\nopen class Base\nfun Base.extra() {}\n"),
+                 ("/ws/C.kt", "package q\nimport p.Base as B\nclass Child : B()\n"),
+                 ("/ws/U.kt", "package u\nimport q.Child\nimport p.extra\nfun f(x: Child) { x.extra() }\n")];
+    assert_eq!(mem(&files, "/ws/U.kt", 3, "extra"), ["/ws/B.kt:2"]);
+}
+
+#[test]
+fn external_receiver_extension_uses_import_identity() {
+    let files = [("/ws/E.kt", "package e\nimport lib.Repo as R\nfun R.extra() {}\n"),
+                 ("/ws/U.kt", "package u\nimport lib.Repo\nimport e.extra\nfun f(x: Repo) { x.extra() }\n")];
+    assert_eq!(mem(&files, "/ws/U.kt", 3, "extra"), ["/ws/E.kt:2"]);
+}
+
+#[test]
+fn wildcard_import_of_nested_types_keeps_member_navigation() {
+    let files = [("/ws/O.kt", "package p\nclass Outer {\n  class Inner { fun go() {} }\n}\n"),
+                 ("/ws/I.kt", "package q\nclass Inner { fun other() {} }\n"),
+                 ("/ws/U.kt", "package u\nimport p.Outer.*\nfun f(x: Inner) { x.go() }\n")];
+    assert_eq!(mem(&files, "/ws/U.kt", 2, "go"), ["/ws/O.kt:2"]);
+    assert_eq!(mem(&files, "/ws/U.kt", 2, "Inner"), ["/ws/O.kt:2"]);
+}
+
+#[test]
+fn fully_qualified_standard_type_selects_only_its_extension() {
+    let files = [("/ws/E.kt", "package e\nfun String.extra() {}\nfun Int.extra() {}\n"),
+                 ("/ws/U.kt", "package u\nimport e.extra\nfun f(x: kotlin.String) { x.extra() }\n")];
+    assert_eq!(mem(&files, "/ws/U.kt", 2, "extra"), ["/ws/E.kt:1"]);
+}
+
+#[test]
+fn wildcard_external_type_import_selects_only_its_extension() {
+    let files = [("/ws/E.kt", "package e\nimport lib.Repo\nimport lib.Other\nfun Repo.extra() {}\nfun Other.extra() {}\n"),
+                 ("/ws/U.kt", "package u\nimport lib.*\nimport e.extra\nfun f(x: Repo) { x.extra() }\n")];
+    assert_eq!(mem(&files, "/ws/U.kt", 3, "extra"), ["/ws/E.kt:3"]);
+}
+
+
+#[test]
+fn qualified_external_receiver_ignores_unrelated_project_types() {
+    let files = [("/ws/E.kt", "package e\nfun lib.Repo.extra() {}\nfun lib.Other.extra() {}\n"),
+                 ("/ws/R.kt", "package q\nclass Repo\n"),
+                 ("/ws/U.kt", "package u\nimport lib.Repo as R\nimport e.extra\nfun f(x: R) { x.extra() }\n")];
+    assert_eq!(mem(&files, "/ws/U.kt", 3, "extra"), ["/ws/E.kt:1"]);
+}
+
+#[test]
+fn qualified_external_extension_does_not_apply_to_a_project_type() {
+    let files = [("/ws/E.kt", "package e\nfun lib.Repo.extra() {}\n"),
+                 ("/ws/R.kt", "package q\nclass Repo\n"),
+                 ("/ws/U.kt", "package u\nimport q.Repo\nimport e.extra\nfun f(x: Repo) { x.extra() }\n")];
+    assert!(mem(&files, "/ws/U.kt", 3, "extra").is_empty());
+}
+
+
+#[test]
+fn imported_external_outer_type_selects_only_its_nested_extension() {
+    for (import, receiver) in [("import lib.Outer as O", "O.Inner"), ("import lib.Outer", "Outer.Inner")] {
+        let text = format!("package u\n{import}\nimport e.extra\nfun f(x: {receiver}) {{ x.extra() }}\n");
+        let files = [("/ws/E.kt", "package e\nfun lib.Outer.Inner.extra() {}\nfun lib.Other.extra() {}\n"),
+                     ("/ws/U.kt", text.as_str())];
+        assert_eq!(mem(&files, "/ws/U.kt", 3, "extra"), ["/ws/E.kt:1"], "{receiver}");
+    }
+}

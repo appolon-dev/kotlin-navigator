@@ -2,7 +2,7 @@
 //! small thread pool, the initial index is built in the background.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -47,6 +47,9 @@ pub struct State {
     ready_timeout: Duration,
     /// Cancel flags of the requests in flight.
     requests: Mutex<HashMap<RequestId, Cancel>>,
+    /// Live updates (including deletions) take precedence over the initial scan.
+    /// Lock order: docs, updated, index.
+    updated: Mutex<HashSet<PathBuf>>,
 }
 
 impl State {
@@ -59,6 +62,7 @@ impl State {
             ready_changed: Condvar::new(),
             ready_timeout,
             requests: Mutex::default(),
+            updated: Mutex::default(),
         })
     }
 
@@ -91,8 +95,10 @@ impl State {
         let Some(doc) = OpenDoc::parse(path.clone(), text, module) else { return };
         let mut docs = write(&self.docs);
         let doc = docs.insert(doc);
+        let mut updated = self.updated.lock().unwrap_or_else(PoisonError::into_inner);
         let mut index = write(&self.index);
         if self.indexable(&index, &path) {
+            updated.insert(path);
             index.upsert(doc.summary.clone());
         }
     }
@@ -106,9 +112,11 @@ impl State {
     /// index, one whose parse gives up keeps what was indexed.
     pub fn reload_from_disk(&self, path: &Path) {
         let docs = read(&self.docs);
+        let mut updated = self.updated.lock().unwrap_or_else(PoisonError::into_inner);
         if docs.get(path).is_some() || !self.indexable(&read(&self.index), path) {
             return;
         }
+        updated.insert(path.to_path_buf());
         let Some(text) = scan::read_source(path) else {
             write(&self.index).remove(path);
             return;
@@ -149,8 +157,12 @@ impl State {
     /// Adds scanned files to the live index; an open buffer wins over what was read from disk.
     pub fn publish(&self, summaries: Vec<FileSummary>) {
         let docs = read(&self.docs);
+        let updated = self.updated.lock().unwrap_or_else(PoisonError::into_inner);
         let mut index = write(&self.index);
         for summary in summaries {
+            if updated.contains(&summary.path) {
+                continue;
+            }
             match docs.get(&summary.path) {
                 Some(doc) => index.upsert(doc.summary.clone()),
                 None => index.upsert(summary),

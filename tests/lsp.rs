@@ -293,3 +293,44 @@ fn cancelling_an_unknown_request_is_ignored() {
     assert_eq!(repository_definition(&mut c, &feature)[0]["uri"], uri(&domain));
     c.shutdown();
 }
+
+#[test]
+fn scanned_summary_cannot_overwrite_a_newer_disk_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Race.kt");
+    let old = kotlin_navigator::parse::summarize_text(path.clone(), "class Old\n").unwrap().1;
+    let state = State::new(vec![dir.path().into()], Duration::ZERO);
+    fs::write(&path, "class New\n").unwrap();
+    state.reload_from_disk(&path);
+    state.publish(vec![old]);
+    state.mark_ready();
+    assert!(lsp::workspace_symbols(&state, "Old").is_empty());
+    assert_eq!(lsp::workspace_symbols(&state, "New").len(), 1);
+}
+
+#[test]
+fn scanned_summary_cannot_restore_a_deleted_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Deleted.kt");
+    let old = kotlin_navigator::parse::summarize_text(path.clone(), "class Deleted\n").unwrap().1;
+    let state = State::new(vec![dir.path().into()], Duration::ZERO);
+    state.reload_from_disk(&path);
+    state.publish(vec![old]);
+    state.mark_ready();
+    assert!(lsp::workspace_symbols(&state, "Deleted").is_empty());
+}
+
+#[test]
+fn scanned_summary_cannot_overwrite_a_closed_edited_buffer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Race.kt");
+    let old = kotlin_navigator::parse::summarize_text(path.clone(), "class Old\n").unwrap().1;
+    let state = State::new(vec![dir.path().into()], Duration::ZERO);
+    state.open_or_change(path.clone(), "class New\n".into());
+    fs::write(&path, "class New\n").unwrap();
+    state.close(&path);
+    state.publish(vec![old]);
+    state.mark_ready();
+    assert!(lsp::workspace_symbols(&state, "Old").is_empty());
+    assert_eq!(lsp::workspace_symbols(&state, "New").len(), 1);
+}

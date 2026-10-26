@@ -112,3 +112,16 @@ fn a_set_flag_stops_the_walk() {
     cancel.clone().set();
     assert_eq!(subtypes(&index, decl(&index, "com.fx.core.Base"), &cancel), Err(Cancelled));
 }
+
+#[test]
+fn aliased_supertype_keeps_subclasses_and_overrides() {
+    let mut index = Index::default();
+    for (p, text) in [("/ws/Base.kt", "package p\ninterface Base { fun ping() }\n"),
+                      ("/ws/Child.kt", "package q\nimport p.Base as B\nclass Child : B { override fun ping() {} }\n")] {
+        index.upsert(summarize_text(PathBuf::from(p), text).unwrap().1);
+    }
+    let cancel = Cancel::default();
+    assert_eq!(names(subtypes(&index, decl(&index, "p.Base"), &cancel).unwrap()), ["Child.kt:2"]);
+    assert_eq!(names(implementations(&index, decl(&index, "p.Base.ping"), &cancel).unwrap()), ["Child.kt:2"]);
+    assert_eq!(names(family(&index, decl(&index, "p.Base.ping"), &cancel).unwrap()), ["Base.kt:1", "Child.kt:2"]);
+}

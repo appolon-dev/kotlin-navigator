@@ -167,3 +167,12 @@ fn type_parameters_and_generic_arguments_lead_nowhere() {
     assert!(mem_type(&files, "/ws/a/U.kt", 5, "xs").is_empty()); // List<Box> leads to List, not to Box
     assert_eq!(mem_type(&files, "/ws/a/U.kt", 6, "b"), ["U.kt:1"]);
 }
+
+#[test]
+fn type_definition_respects_the_declarations_nested_scope() {
+    let files = [("/ws/R.kt", "package p\nclass Right\n"),
+                 ("/ws/U.kt", "package p\nclass Outer {\n  class Right\n  val item: Right? = null\n  fun f(x: Right) { x }\n  fun make(): Right = TODO()\n}\nfun use(o: Outer) { o.item; o.make() }\n")];
+    assert_eq!(mem_type(&files, "/ws/U.kt", 4, "x }"), ["U.kt:2"]);
+    assert_eq!(mem_type(&files, "/ws/U.kt", 7, "item"), ["U.kt:2"]);
+    assert_eq!(mem_type(&files, "/ws/U.kt", 7, "make"), ["U.kt:2"]);
+}

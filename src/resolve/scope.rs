@@ -5,8 +5,8 @@ use std::ops::Range;
 
 use tree_sitter::{Node, Tree};
 
-use crate::model::Span;
-use crate::parse::{declared, named_child_of_kind, receiver_before, span_of, type_child, variables};
+use crate::model::{Decl, FileSummary, Span};
+use crate::parse::{declared, named_child_of_kind, receiver_before, span_at, span_of, type_child, variables};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LocalKind {
@@ -31,6 +31,15 @@ pub enum Implicit {
     Extension(String),
     /// Inside a class-like declaration: the bytes of its name (`companion` for an unnamed companion).
     Container(Range<usize>),
+}
+
+/// The nearest class enclosing a position, for lexical lookup of nested types.
+pub(crate) fn type_scope_at<'a>(summary: &'a FileSummary, tree: &Tree, text: &str, at: usize) -> Option<&'a Decl> {
+    implicit_receivers(tree, text, at).into_iter().find_map(|receiver| {
+        let Implicit::Container(range) = receiver else { return None };
+        let span = span_at(text, range);
+        summary.decls.iter().find(|d| d.name_range == span)
+    })
 }
 
 /// Local declarations of `name` visible at `at`, nearest first.

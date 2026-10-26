@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use crate::cancel::{Cancel, Cancelled};
 use crate::index::Index;
 use crate::model::{Decl, FileSummary, Flags};
-use crate::resolve::members::{Ty, container, own_members, resolve_type, supertype_members};
+use crate::resolve::members::{Ty, container, own_members, resolve_type_in, supertype_members};
 use crate::resolve::rank::DeclRef;
 use crate::resolve::{Current, Found, Target, by_fqn, target_at};
 use crate::sources::Sources;
@@ -30,8 +30,8 @@ fn ordered(mut list: Vec<DeclRef>) -> Vec<DeclRef> {
 /// class or a member of one needs, and the subtypes of each class once.
 pub(crate) struct Hierarchy<'a> {
     index: &'a Index,
-    /// Last segment of a written supertype -> the classes that name it.
-    heirs: Option<HashMap<&'a str, Vec<DeclRef<'a>>>>,
+    /// Resolved supertype -> its direct subclasses, including aliased imports.
+    heirs: Option<HashMap<Key, Vec<DeclRef<'a>>>>,
     cache: HashMap<Key, Vec<DeclRef<'a>>>,
 }
 
@@ -51,12 +51,8 @@ impl<'a> Hierarchy<'a> {
         let mut found = Vec::new();
         while let Some(current) = queue.pop_front() {
             cancel.check()?;
-            let (current_file, current_decl) = current;
-            for &(file, decl) in heirs.get(current_decl.name.as_str()).into_iter().flatten() {
-                let names_current = decl.supertypes.iter().filter(|w| w.rsplit('.').next() == Some(current_decl.name.as_str())).any(|w| {
-                    resolve_type(index, file, w).iter().any(|&r| key(r) == key((current_file, current_decl)))
-                });
-                if names_current && seen.insert(key((file, decl))) {
+            for &(file, decl) in heirs.get(&key(current)).into_iter().flatten() {
+                if seen.insert(key((file, decl))) {
                     found.push((file, decl));
                     queue.push_back((file, decl));
                 }
@@ -89,7 +85,7 @@ impl<'a> Hierarchy<'a> {
             let mut related: Vec<DeclRef> = Vec::new();
             if let Some(class) = owner(file, d) {
                 if d.flags.contains(Flags::OVERRIDE) {
-                    let ty = Ty { name: class.1.name.clone(), decls: vec![class] };
+                    let ty = Ty { name: class.1.name.clone(), decls: vec![class], context: class.0 };
                     related.extend(supertype_members(index, &ty, &d.name).0);
                 }
                 related.extend(self.overrides(class, &d.name, cancel)?);
@@ -125,12 +121,14 @@ impl<'a> Hierarchy<'a> {
     }
 }
 
-/// Last segment of a written supertype -> the class-like declarations that name it.
-fn heirs_of(index: &Index) -> HashMap<&str, Vec<DeclRef<'_>>> {
-    let mut heirs: HashMap<&str, Vec<DeclRef>> = HashMap::new();
+/// Resolved supertype -> the class-like declarations that inherit from it.
+fn heirs_of(index: &Index) -> HashMap<Key, Vec<DeclRef<'_>>> {
+    let mut heirs: HashMap<Key, Vec<DeclRef>> = HashMap::new();
     for (file, decl) in index.decls().filter(|(_, d)| d.kind.is_class_like()) {
         for written in &decl.supertypes {
-            heirs.entry(written.rsplit('.').next().unwrap_or(written)).or_default().push((file, decl));
+            for parent in resolve_type_in(index, file, written, Some(decl)) {
+                heirs.entry(key(parent)).or_default().push((file, decl));
+            }
         }
     }
     heirs

@@ -13,12 +13,12 @@ use std::path::PathBuf;
 use tree_sitter::Tree;
 
 use self::context::{Receiver, Reference, Role, reference_at};
-use self::members::{Ty, leaves_project, members_named, resolve_type, supertype_members};
+use self::members::{Ty, leaves_project, members_named, resolve_type_in, supertype_members};
 use self::rank::{DeclRef, prefer, rank, rank_with_level, tier, visible};
-use self::scope::{Implicit, is_property, Local, LocalKind, enclosing_declarations, find_local, implicit_receivers};
+use self::scope::{Implicit, is_property, Local, LocalKind, enclosing_declarations, find_local, implicit_receivers, type_scope_at};
 use crate::docs::OpenDoc;
 use crate::index::Index;
-use crate::model::{DeclKind, FileSummary, Flags, Import, Lang, Span};
+use crate::model::{Decl, DeclKind, FileSummary, Flags, Import, Lang, Span};
 use crate::parse::{span_at, span_of, type_child};
 use crate::sources::Sources;
 use Certainty::{Exact, Probable};
@@ -188,6 +188,7 @@ struct Variable<'a> {
     type_name: Option<String>,
     from_call: bool,
     file: &'a FileSummary,
+    scope: Option<&'a Decl>,
 }
 
 struct Resolver<'r, 'a> {
@@ -223,8 +224,12 @@ impl<'a> Resolver<'_, 'a> {
         if let Some(import) = self.explicit_import() {
             return (decls(self.rank(by_fqn(self.index, &import.path))), Exact);
         }
-        let top: Vec<DeclRef> =
-            self.index.lookup(self.name).into_iter().filter(|(_, d)| d.container.is_none() || d.kind.is_class_like()).collect();
+        let top: Vec<DeclRef> = self.index.lookup(self.name).into_iter()
+            .filter(|(_, d)| {
+                d.container.is_none() || (d.kind.is_class_like()
+                    && self.summary.imports.iter().any(|i| i.wildcard && i.path == d.parent_fqn()))
+            })
+            .collect();
         let (found, level) = self.pick(top);
         if !found.is_empty() {
             return (decls(found), if level { Exact } else { Probable });
@@ -259,14 +264,23 @@ impl<'a> Resolver<'_, 'a> {
     fn ty_of(&self, receiver: &Implicit) -> Option<Ty<'a>> {
         match receiver {
             Implicit::Extension(name) => {
-                Some(Ty { name: name.clone(), decls: resolve_type(self.index, self.summary, name) })
+                Some(Ty {
+                    name: name.clone(),
+                    decls: resolve_type_in(self.index, self.summary, name, self.type_scope()),
+                    context: self.summary,
+                })
             }
             Implicit::Container(range) => {
                 let span = span_at(self.text, range.clone());
                 let decl = self.summary.decls.iter().find(|d| d.name_range == span)?;
-                Some(Ty { name: decl.name.clone(), decls: vec![(self.summary, decl)] })
+                Some(Ty { name: decl.name.clone(), decls: vec![(self.summary, decl)], context: self.summary })
             }
         }
+    }
+
+    /// Nearest enclosing class; its nested types and those of its parents are in scope.
+    fn type_scope(&self) -> Option<&'a Decl> {
+        type_scope_at(self.summary, self.tree, self.text, self.at)
     }
 
     /// `super.name`: members of the supertypes of the class around the cursor.
@@ -282,17 +296,17 @@ impl<'a> Resolver<'_, 'a> {
     fn on_path(&self, path: &str) -> (Vec<Found<'a>>, Certainty) {
         if let Some(variable) = self.variable(path).filter(|_| !path.contains('.')) {
             let Some(type_name) = variable.type_name else { return self.by_name() };
-            let decls = resolve_type(self.index, variable.file, &type_name);
+            let decls = resolve_type_in(self.index, variable.file, &type_name, variable.scope);
             if variable.from_call && decls.is_empty() {
                 return self.by_name();
             }
-            return self.members(&Ty { name: type_name, decls }, false);
+            return self.members(&Ty { name: type_name, decls, context: variable.file }, false);
         }
-        let decls = resolve_type(self.index, self.summary, path);
+        let decls = resolve_type_in(self.index, self.summary, path, self.type_scope());
         if decls.is_empty() {
             return self.by_name();
         }
-        self.members(&Ty { name: path.to_string(), decls }, true)
+        self.members(&Ty { name: path.to_string(), decls, context: self.summary }, true)
     }
 
     /// Members of `ty`; nothing when the type is known but lacks them (probably nothing when
@@ -312,12 +326,18 @@ impl<'a> Resolver<'_, 'a> {
     fn variable(&self, name: &str) -> Option<Variable<'a>> {
         let locals = find_local(self.tree, self.text, self.at, name);
         if let Some(local) = locals.into_iter().find(|l| l.kind == LocalKind::Value) {
-            return Some(Variable { type_name: local.type_name, from_call: local.from_call, file: self.summary });
+            return Some(Variable {
+                type_name: local.type_name,
+                from_call: local.from_call,
+                file: self.summary,
+                scope: self.type_scope(),
+            });
         }
         let property = |(f, d): DeclRef<'a>| Variable {
             type_name: d.type_hint.clone(),
             from_call: d.flags.contains(Flags::CALL_HINT),
             file: f,
+            scope: Some(d),
         };
         for receiver in implicit_receivers(self.tree, self.text, self.at) {
             let Some(ty) = self.ty_of(&receiver) else { continue };

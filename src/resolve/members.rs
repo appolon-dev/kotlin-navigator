@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::index::Index;
-use crate::model::{Decl, FileSummary, Flags};
+use crate::model::{Decl, FileSummary, Flags, Lang};
 use crate::resolve::by_fqn;
 use crate::resolve::rank::DeclRef;
 
@@ -17,45 +17,67 @@ const MAX_DEPTH: usize = 5;
 pub struct Ty<'a> {
     pub name: String,
     pub decls: Vec<DeclRef<'a>>,
+    /// Imports where the receiver type was written, also needed for external types.
+    pub context: &'a FileSummary,
 }
 
 /// Class-like declarations a type name written in the file `context` means.
 pub fn resolve_type<'a>(index: &'a Index, context: &'a FileSummary, name: &str) -> Vec<DeclRef<'a>> {
-    let Some((first, rest)) = name.split_once('.') else { return simple_type(index, context, name) };
+    resolve_type_in(index, context, name, None)
+}
+
+/// Resolves a type in a declaration's lexical scope; unrelated nested types are not visible.
+pub(crate) fn resolve_type_in<'a>(
+    index: &'a Index,
+    context: &'a FileSummary,
+    name: &str,
+    scope: Option<&'a Decl>,
+) -> Vec<DeclRef<'a>> {
+    let Some((first, rest)) = name.split_once('.') else { return simple_type(index, context, name, scope) };
     let exact = class_like(by_fqn(index, name));
     if !exact.is_empty() {
         return exact;
     }
     // `Outer.Inner`: the outer type by its simple name, then down its nested types.
-    let mut found = simple_type(index, context, first);
+    let mut found = simple_type(index, context, first, scope);
     for segment in rest.split('.') {
         found = found.iter().flat_map(|&(f, d)| children(f, d).filter(move |c| c.name == segment && c.kind.is_class_like()).map(move |c| (f, c))).collect();
     }
-    if !found.is_empty() {
-        return found;
-    }
-    simple_type(index, context, name.rsplit('.').next().unwrap_or(name))
+    // A qualified type missing from the project must not become an unrelated
+    // project class merely because its last segment has the same name.
+    found
 }
 
-fn simple_type<'a>(index: &'a Index, context: &'a FileSummary, name: &str) -> Vec<DeclRef<'a>> {
+fn simple_type<'a>(
+    index: &'a Index,
+    context: &'a FileSummary,
+    name: &str,
+    scope: Option<&'a Decl>,
+) -> Vec<DeclRef<'a>> {
+    for owner in std::iter::successors(scope, |d| container(context, d)) {
+        let nested = class_like(own_members(context, owner, name, false));
+        if !nested.is_empty() {
+            return nested;
+        }
+    }
     let key = |path: &'a str, alias: &'a Option<String>| alias.as_deref().unwrap_or_else(|| path.rsplit('.').next().unwrap_or(path));
     if let Some(import) = context.imports.iter().find(|i| !i.wildcard && key(&i.path, &i.alias) == name) {
         return class_like(by_fqn(index, &import.path));
     }
-    let own: Vec<DeclRef> = context.decls.iter().filter(|d| d.name == name && d.kind.is_class_like()).map(|d| (context, d)).collect();
+    let own: Vec<DeclRef> = context.decls.iter().filter(|d| d.container.is_none() && d.name == name && d.kind.is_class_like()).map(|d| (context, d)).collect();
     if !own.is_empty() {
         return own;
     }
     let candidates = class_like(index.lookup(name));
     let levels: [&dyn Fn(&FileSummary, &Decl) -> bool; 2] = [
-        &|f, _| f.package == context.package,
+        &|f, d| d.container.is_none() && f.package == context.package,
         &|_, d| context.imports.iter().any(|i| i.wildcard && i.path == d.parent_fqn()),
     ];
     levels
         .iter()
         .map(|keep| candidates.iter().copied().filter(|(f, d)| keep(f, d)).collect::<Vec<_>>())
         .find(|selected| !selected.is_empty())
-        .unwrap_or(candidates)
+        .unwrap_or_else(|| candidates.into_iter().filter(|(_, d)| d.container.is_none()).collect())
 }
 
 /// The first non-empty group: members of T (and of its companion when `companion`),
@@ -69,14 +91,61 @@ pub fn members_named<'a>(index: &'a Index, ty: &Ty<'a>, name: &str, companion: b
     if !inherited.is_empty() {
         return inherited;
     }
-    let last = |s: &str| s.rsplit('.').next().unwrap_or(s).to_string();
     let mut receivers: HashSet<String> = super_names;
-    receivers.insert(last(&ty.name));
-    index.lookup(name).into_iter().filter(|(_, d)| d.receiver.as_deref().is_some_and(|r| receivers.contains(&last(r)))).collect()
+    if ty.decls.is_empty() {
+        receivers.extend(external_type_names(ty.context, &ty.name));
+    } else {
+        receivers.extend(ty.decls.iter().map(|(_, d)| d.fqn.clone()));
+    }
+    index.lookup(name).into_iter()
+        .filter(|(f, d)| {
+            d.receiver.as_deref().is_some_and(|r| {
+                type_names(index, f, r, Some(d)).iter().any(|name| receivers.contains(name))
+            })
+        })
+        .collect()
+}
+
+/// Canonical project names, or the imported/written name of an external type.
+fn type_names(index: &Index, file: &FileSummary, name: &str, scope: Option<&Decl>) -> HashSet<String> {
+    let resolved = resolve_type_in(index, file, name, scope);
+    if !resolved.is_empty() {
+        return resolved.iter().map(|(_, d)| d.fqn.clone()).collect();
+    }
+    external_type_names(file, name)
+}
+
+/// Possible identities of an unindexed type. Explicit imports and qualified names
+/// are definitive; wildcard and default imports are candidates until dependencies are indexed.
+fn external_type_names(file: &FileSummary, name: &str) -> HashSet<String> {
+    let (first, nested) = name.split_once('.').map_or((name, None), |(first, rest)| (first, Some(rest)));
+    if let Some(import) = file.imports.iter().find(|i| {
+        !i.wildcard && i.alias.as_deref().unwrap_or_else(|| i.path.rsplit('.').next().unwrap_or(&i.path)) == first
+    }) {
+        return HashSet::from([nested.map_or_else(|| import.path.clone(), |rest| format!("{}.{rest}", import.path))]);
+    }
+    if nested.is_some() {
+        return HashSet::from([name.to_string()]);
+    }
+    let mut names = HashSet::from([name.to_string()]);
+    if !file.package.is_empty() {
+        names.insert(format!("{}.{name}", file.package));
+    }
+    names.extend(file.imports.iter().filter(|i| i.wildcard).map(|i| format!("{}.{name}", i.path)));
+    names.insert(format!("java.lang.{name}"));
+    if file.lang == Lang::Kotlin {
+        for package in [
+            "kotlin", "kotlin.annotation", "kotlin.collections", "kotlin.comparisons", "kotlin.io",
+            "kotlin.ranges", "kotlin.sequences", "kotlin.text", "kotlin.jvm",
+        ] {
+            names.insert(format!("{package}.{name}"));
+        }
+    }
+    names
 }
 
 /// Members named `name` on the nearest supertype level that has any (breadth-first,
-/// `MAX_DEPTH` levels, each type once), and the last segments of every supertype name met.
+/// `MAX_DEPTH` levels, each type once), and the possible identities of every supertype met.
 pub fn supertype_members<'a>(index: &'a Index, ty: &Ty<'a>, name: &str) -> (Vec<DeclRef<'a>>, HashSet<String>) {
     let mut names = HashSet::new();
     let mut seen: HashSet<(&Path, usize)> = ty.decls.iter().filter_map(|&(f, d)| Some((f.path.as_path(), position(f, d)?))).collect();
@@ -85,8 +154,13 @@ pub fn supertype_members<'a>(index: &'a Index, ty: &Ty<'a>, name: &str) -> (Vec<
         let mut next = Vec::new();
         for (f, d) in level {
             for written in &d.supertypes {
-                names.insert(written.rsplit('.').next().unwrap_or(written).to_string());
-                for (sf, sd) in resolve_type(index, f, written) {
+                let resolved = resolve_type_in(index, f, written, Some(d));
+                if resolved.is_empty() {
+                    names.extend(external_type_names(f, written));
+                } else {
+                    names.extend(resolved.iter().map(|(_, d)| d.fqn.clone()));
+                }
+                for (sf, sd) in resolved {
                     if position(sf, sd).is_some_and(|i| seen.insert((sf.path.as_path(), i))) {
                         next.push((sf, sd));
                     }
@@ -111,7 +185,7 @@ pub fn leaves_project<'a>(index: &'a Index, ty: &Ty<'a>) -> bool {
         let mut next = Vec::new();
         for (f, d) in level {
             for written in &d.supertypes {
-                let found = resolve_type(index, f, written);
+                let found = resolve_type_in(index, f, written, Some(d));
                 if found.is_empty() {
                     return true;
                 }
