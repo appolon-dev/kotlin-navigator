@@ -1,4 +1,4 @@
-use kotlin_navigator::model::{DeclKind::*, DeclKind, FileSummary, Import, Span};
+use kotlin_navigator::model::{DeclKind::*, DeclKind, FileSummary, Flags, Import, Span};
 use kotlin_navigator::parse::summarize_text;
 use std::path::PathBuf;
 
@@ -29,7 +29,7 @@ fn nested_companion_and_enum() {
 
 #[test]
 fn comments_strings_and_locals_are_not_indexed() {
-    assert_eq!(fqns("// class Fake\nval s = \"class Fake2\"\n/* object Fake3 */\nfun f() {\n  class Local\n}\nclass Real\n"), v(&[("Real", Class)]));
+    assert_eq!(fqns("// class Fake\nval s = \"class Fake2\"\n/* object Fake3 */\nfun f() {\n  class Local\n}\nclass Real\n"), v(&[("s", Property), ("f", Function), ("Real", Class)]));
 }
 
 #[test]
@@ -90,4 +90,42 @@ fn whole_file_parsed_as_error_keeps_declarations() {
 fn summary_records_source_set() {
     let (_, s) = summarize_text(PathBuf::from("/ws/m/src/iosMain/kotlin/A.kt"), "class A\n").unwrap();
     assert_eq!((s.source_set.as_deref(), s.module.clone()), (Some("iosMain"), None));
+}
+
+fn decl<'a>(s: &'a FileSummary, fqn: &str) -> &'a kotlin_navigator::model::Decl {
+    s.decls.iter().find(|d| d.fqn == fqn).unwrap_or_else(|| panic!("no {fqn}"))
+}
+
+#[test]
+fn functions_properties_and_their_details() {
+    let text = "package p\nfun top() {}\nfun <T> Repo.ext(a: Int): T = TODO()\nval Repo.extProp: Int get() = 1\n\
+private val typed: Map<String, Int>? = null\ninternal val made = Repo(1)\nval lambda: () -> Unit = {}\nexpect fun plat(): String\n\
+class VM(private val repo: Repo, plain: Int) : Base(), a.b.Iface<T>, Del by d {\n    override fun load() { val local = 1 }\n\
+    companion object { fun create(): VM = TODO() }\n}\n";
+    assert_eq!(fqns(text), v(&[("p.top", Function), ("p.ext", Function), ("p.extProp", Property), ("p.typed", Property),
+        ("p.made", Property), ("p.lambda", Property), ("p.plat", Function), ("p.VM", Class), ("p.VM.repo", Property),
+        ("p.VM.load", Function), ("p.VM.Companion", Object), ("p.VM.Companion.create", Function)]));
+    let s = summary(text);
+    assert_eq!((decl(&s, "p.ext").receiver.as_deref(), decl(&s, "p.ext").type_hint.as_deref()), (Some("Repo"), None));
+    assert_eq!((decl(&s, "p.extProp").receiver.as_deref(), decl(&s, "p.extProp").type_hint.as_deref()), (Some("Repo"), Some("Int")));
+    assert_eq!((decl(&s, "p.typed").type_hint.as_deref(), decl(&s, "p.typed").flags), (Some("Map"), Flags::PRIVATE));
+    assert_eq!((decl(&s, "p.made").type_hint.as_deref(), decl(&s, "p.made").flags), (Some("Repo"), Flags::INTERNAL | Flags::CALL_HINT));
+    assert_eq!(decl(&s, "p.lambda").type_hint, None);
+    assert_eq!(decl(&s, "p.plat").flags, Flags::EXPECT);
+    assert_eq!(decl(&s, "p.VM").supertypes, vec!["Base", "a.b.Iface", "Del"]);
+    assert_eq!((decl(&s, "p.VM.repo").type_hint.as_deref(), decl(&s, "p.VM.repo").flags), (Some("Repo"), Flags::PRIVATE));
+    assert_eq!(decl(&s, "p.VM.load").flags, Flags::OVERRIDE);
+    assert_eq!(decl(&s, "p.VM.Companion").flags, Flags::COMPANION);
+    assert_eq!(decl(&s, "p.VM.load").name_range, Span { line: 9, start: 17, end: 21 });
+}
+
+#[test]
+fn destructuring_and_qualified_constructor_calls() {
+    let s = summary("val (a, b: Repo) = pair\nval x = a.b.Foo(1)\nval y = foo(1)\nval z = a?.Foo()\nval w = Foo::Bar()\n");
+    assert_eq!(fqns("val (a, b: Repo) = pair\n"), v(&[("a", Property), ("b", Property)]));
+    assert_eq!((decl(&s, "b").type_hint.as_deref(), decl(&s, "b").flags), (Some("Repo"), Flags::default()));
+    assert_eq!((decl(&s, "x").type_hint.as_deref(), decl(&s, "x").flags), (Some("a.b.Foo"), Flags::CALL_HINT));
+    for name in ["a", "y", "z", "w"] {
+        assert_eq!(decl(&s, name).type_hint, None, "{name}");
+    }
 }

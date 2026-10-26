@@ -84,6 +84,28 @@ pub(crate) fn clean_dotted(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace() && *c != '`').collect()
 }
 
+/// The cleaned name of a Kotlin or Java type node: `a.b.Repo<T>?` → `a.b.Repo`. Function
+/// types, primitives and arrays have none.
+pub(crate) fn type_name(text: &str, node: Node) -> Option<String> {
+    let mut cursor = node.walk();
+    match node.kind() {
+        "nullable_type" | "parenthesized_type" | "generic_type" => type_name(text, node.named_child(0)?),
+        "type_identifier" => Some(ident_text(text, node)),
+        "user_type" | "scoped_type_identifier" => {
+            let parts: Vec<String> = node
+                .named_children(&mut cursor)
+                .filter_map(|c| match c.kind() {
+                    "identifier" | "type_identifier" => Some(ident_text(text, c)),
+                    "scoped_type_identifier" => type_name(text, c),
+                    _ => None,
+                })
+                .collect();
+            (!parts.is_empty()).then(|| parts.join("."))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn qualify(prefix: &str, name: &str) -> String {
     if prefix.is_empty() { name.to_string() } else { format!("{prefix}.{name}") }
 }

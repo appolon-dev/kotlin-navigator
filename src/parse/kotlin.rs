@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use tree_sitter::{Node, Tree};
 
 use self::recover::recover;
-use super::{DeclSink, dotted_text, ident_text, named_child_of_kind, parse};
-use crate::model::{DeclKind, FileSummary, Import, Lang};
+use super::{DeclSink, dotted_text, ident_text, named_child_of_kind, parse, type_name};
+use crate::model::{DeclKind, FileSummary, Flags, Import, Lang};
 use crate::source_set::source_set_of;
 
 pub(crate) fn summarize(path: PathBuf, text: &str, tree: &Tree) -> FileSummary {
@@ -101,6 +101,10 @@ fn visit(sink: &mut DeclSink, node: Node, container: Option<u32>) {
     for child in children {
         if child.kind() == "ERROR" {
             recover(sink, child, container);
+        } else if let Some((word, body)) = swallowed_companion(sink.text, child).filter(|_| node.kind() == "lambda_literal") {
+            let index = sink.push(word, Some("Companion"), DeclKind::Object, container);
+            sink.decls[index as usize].flags = Flags::COMPANION;
+            visit(sink, body, Some(index));
         } else {
             declare(sink, child, container);
         }
@@ -108,7 +112,13 @@ fn visit(sink: &mut DeclSink, node: Node, container: Option<u32>) {
 }
 
 /// Adds `node` and its body members if it is a declaration; returns whether it was.
+/// Bodies of functions, accessors, initializers and lambdas are not entered.
 fn declare(sink: &mut DeclSink, node: Node, container: Option<u32>) -> bool {
+    match node.kind() {
+        "function_declaration" => return function(sink, node, container),
+        "property_declaration" => return property(sink, node, container),
+        _ => {}
+    }
     let found = match node.kind() {
         "class_declaration" => node.child_by_field_name("name").map(|n| (n, None, class_kind(sink.text, node))),
         "object_declaration" => node.child_by_field_name("name").map(|n| (n, None, DeclKind::Object)),
@@ -122,12 +132,177 @@ fn declare(sink: &mut DeclSink, node: Node, container: Option<u32>) -> bool {
     };
     let Some((name_node, fixed_name, kind)) = found else { return false };
     let index = sink.push(name_node, fixed_name, kind, container);
+    let mut flags = modifier_flags(sink.text, node);
+    if node.kind() == "companion_object" {
+        flags.insert(Flags::COMPANION);
+    }
+    let decl = &mut sink.decls[index as usize];
+    decl.flags = flags;
+    decl.supertypes = supertypes(sink.text, node);
+    let params = named_child_of_kind(node, "primary_constructor").and_then(|p| named_child_of_kind(p, "class_parameters"));
+    if let Some(params) = params {
+        let mut cursor = params.walk();
+        for param in params.named_children(&mut cursor).filter(|p| p.kind() == "class_parameter") {
+            let is_property = anonymous_child(param, "val").or_else(|| anonymous_child(param, "var")).is_some();
+            if let (true, Some(name)) = (is_property, named_child_of_kind(param, "identifier")) {
+                let p = sink.push(name, None, DeclKind::Property, Some(index));
+                sink.decls[p as usize].type_hint = type_child(sink.text, param);
+                sink.decls[p as usize].flags = modifier_flags(sink.text, param);
+            }
+        }
+    }
+    let mut has_body = false;
     for body in ["class_body", "enum_class_body"] {
         if let Some(body) = named_child_of_kind(node, body) {
             visit(sink, body, Some(index));
+            has_body = true;
+        }
+    }
+    if let Some(lambda) = swallowed_body(node).filter(|_| !has_body) {
+        visit(sink, lambda, Some(index));
+    }
+    true
+}
+
+fn function(sink: &mut DeclSink, node: Node, container: Option<u32>) -> bool {
+    let Some(name) = node.child_by_field_name("name") else { return false };
+    let receiver = receiver_before(sink.text, node, name.start_byte());
+    let index = sink.push(name, None, DeclKind::Function, container) as usize;
+    sink.decls[index].receiver = receiver;
+    sink.decls[index].flags = modifier_flags(sink.text, node);
+    true
+}
+
+/// One `Property` per declared variable; `val (a, b) = …` declares two.
+fn property(sink: &mut DeclSink, node: Node, container: Option<u32>) -> bool {
+    let mut cursor = node.walk();
+    let children: Vec<Node> = node.children(&mut cursor).collect();
+    let Some(at) = children.iter().position(|c| matches!(c.kind(), "variable_declaration" | "multi_variable_declaration"))
+    else {
+        return false;
+    };
+    let receiver = receiver_before(sink.text, node, children[at].start_byte());
+    let flags = modifier_flags(sink.text, node);
+    // `val r = Repo(x)`: the initializer is the named node right after `=`.
+    let call_hint = match children[at + 1..] {
+        [eq, init, ..] if eq.kind() == "=" && children[at].kind() == "variable_declaration" => call_type(sink.text, init),
+        _ => None,
+    };
+    let vars = if children[at].kind() == "variable_declaration" {
+        vec![children[at]]
+    } else {
+        let mut cursor = children[at].walk();
+        children[at].named_children(&mut cursor).filter(|v| v.kind() == "variable_declaration").collect()
+    };
+    for var in vars {
+        let Some(name) = named_child_of_kind(var, "identifier") else { continue };
+        let index = sink.push(name, None, DeclKind::Property, container) as usize;
+        let decl = &mut sink.decls[index];
+        decl.receiver = receiver.clone();
+        decl.flags = flags;
+        decl.type_hint = type_child(sink.text, var);
+        if decl.type_hint.is_none() && call_hint.is_some() {
+            decl.type_hint = call_hint.clone();
+            decl.flags.insert(Flags::CALL_HINT);
         }
     }
     true
+}
+
+const TYPES: [&str; 4] = ["user_type", "nullable_type", "parenthesized_type", "function_type"];
+
+/// The name of the first type node among `node`'s children.
+fn type_child(text: &str, node: Node) -> Option<String> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).find(|c| TYPES.contains(&c.kind())).and_then(|t| type_name(text, t))
+}
+
+/// The receiver type of an extension: a type child before the declared name.
+fn receiver_before(text: &str, node: Node, name_start: usize) -> Option<String> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .take_while(|c| c.start_byte() < name_start)
+        .find(|c| TYPES.contains(&c.kind()))
+        .and_then(|t| type_name(text, t))
+}
+
+/// `Repo(x)` or `a.b.Repo(x)`: the called name when it looks like a class (capitalized last segment).
+fn call_type(text: &str, init: Node) -> Option<String> {
+    if init.kind() != "call_expression" {
+        return None;
+    }
+    let name = dotted_identifiers(text, init.named_child(0)?)?;
+    let last = name.rsplit('.').next()?;
+    last.starts_with(|c: char| c.is_uppercase()).then_some(name)
+}
+
+/// `a.b.C` built only from identifiers and `.`; anything else (calls, `?.`, `::`) is None.
+fn dotted_identifiers(text: &str, node: Node) -> Option<String> {
+    match node.kind() {
+        "identifier" => Some(ident_text(text, node)),
+        "navigation_expression" if anonymous_child(node, ".").is_some() => {
+            let left = dotted_identifiers(text, node.named_child(0)?)?;
+            let right = node.named_child(1).filter(|r| r.kind() == "identifier")?;
+            Some(format!("{left}.{}", ident_text(text, right)))
+        }
+        _ => None,
+    }
+}
+
+fn modifier_flags(text: &str, node: Node) -> Flags {
+    let mut flags = Flags::default();
+    let Some(modifiers) = named_child_of_kind(node, "modifiers") else { return flags };
+    let mut cursor = modifiers.walk();
+    for m in modifiers.named_children(&mut cursor) {
+        match (m.kind(), &text[m.byte_range()]) {
+            ("visibility_modifier", "private") => flags.insert(Flags::PRIVATE),
+            ("visibility_modifier", "internal") => flags.insert(Flags::INTERNAL),
+            ("platform_modifier", "expect") => flags.insert(Flags::EXPECT),
+            ("platform_modifier", "actual") => flags.insert(Flags::ACTUAL),
+            ("member_modifier", "override") => flags.insert(Flags::OVERRIDE),
+            _ => {}
+        }
+    }
+    flags
+}
+
+/// `: Base(), a.b.Iface<T>, Del by d` → `Base`, `a.b.Iface`, `Del`.
+fn supertypes(text: &str, node: Node) -> Vec<String> {
+    let Some(specifiers) = named_child_of_kind(node, "delegation_specifiers") else { return Vec::new() };
+    let mut cursor = specifiers.walk();
+    specifiers
+        .named_children(&mut cursor)
+        .filter_map(|s| s.named_child(0))
+        .filter_map(|s| match s.kind() {
+            "constructor_invocation" | "explicit_delegation" => s.named_child(0),
+            _ => Some(s),
+        })
+        .filter_map(|t| type_name(text, t))
+        .collect()
+}
+
+/// In `class A : I by d { … }` the grammar reads the body as a trailing lambda of `d`.
+fn swallowed_body(node: Node) -> Option<Node> {
+    let specifiers = named_child_of_kind(node, "delegation_specifiers")?;
+    let delegation = last_named(specifiers)?.named_child(0).filter(|d| d.kind() == "explicit_delegation")?;
+    let call = last_named(delegation)?;
+    let lambda = last_named(call)?;
+    (call.kind() == "call_expression" && lambda.kind() == "annotated_lambda")
+        .then(|| named_child_of_kind(lambda, "lambda_literal"))
+        .flatten()
+}
+
+fn last_named(node: Node) -> Option<Node> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).last()
+}
+
+/// `companion object { … }` inside a swallowed body reads as `companion object {…}` infix call.
+fn swallowed_companion<'t>(text: &str, node: Node<'t>) -> Option<(Node<'t>, Node<'t>)> {
+    let words = (node.named_child(0)?, node.named_child(1)?, node.named_child(2)?);
+    let is = |n: Node, w: &str| n.kind() == "identifier" && &text[n.byte_range()] == w;
+    (node.kind() == "infix_expression" && is(words.0, "companion") && is(words.1, "object") && words.2.kind() == "lambda_literal")
+        .then_some((words.0, words.2))
 }
 
 fn class_kind(text: &str, node: Node) -> DeclKind {
