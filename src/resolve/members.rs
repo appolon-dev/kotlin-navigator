@@ -102,6 +102,30 @@ pub fn supertype_members<'a>(index: &'a Index, ty: &Ty<'a>, name: &str) -> (Vec<
     (Vec::new(), names)
 }
 
+/// Whether a supertype written up the chain of `ty` (`MAX_DEPTH` levels, each type once) is
+/// not in the project, like `AppCompatActivity`: its members are unknown.
+pub fn leaves_project<'a>(index: &'a Index, ty: &Ty<'a>) -> bool {
+    let mut seen: HashSet<(&Path, usize)> = ty.decls.iter().filter_map(|&(f, d)| Some((f.path.as_path(), position(f, d)?))).collect();
+    let mut level: Vec<DeclRef> = ty.decls.clone();
+    for _ in 0..MAX_DEPTH {
+        let mut next = Vec::new();
+        for (f, d) in level {
+            for written in &d.supertypes {
+                let found = resolve_type(index, f, written);
+                if found.is_empty() {
+                    return true;
+                }
+                next.extend(found.into_iter().filter(|&(sf, sd)| position(sf, sd).is_some_and(|i| seen.insert((sf.path.as_path(), i)))));
+            }
+        }
+        if next.is_empty() {
+            return false;
+        }
+        level = next;
+    }
+    false
+}
+
 /// Declarations named `name` directly inside `owner`, plus inside its companion when asked.
 pub(crate) fn own_members<'a>(file: &'a FileSummary, owner: &'a Decl, name: &str, companion: bool) -> Vec<DeclRef<'a>> {
     let mut found: Vec<DeclRef> = children(file, owner).filter(|d| d.name == name).map(|d| (file, d)).collect();

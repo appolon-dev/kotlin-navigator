@@ -90,6 +90,13 @@ fn members_of_an_expect_class_pair_with_their_actuals() {
 }
 
 #[test]
+fn a_type_whose_supertypes_leave_the_project_may_have_the_member() {
+    let files = [("p/Toast.kt", "package p\nimport android.content.Context\nfun Context.toast() {}\n"),
+                 ("p/MyActivity.kt", "package p\nimport androidx.appcompat.app.AppCompatActivity\nclass MyActivity : AppCompatActivity() {\n  fun f() {\n    toast()\n    this.toast()\n  }\n}\nfun use(a: MyActivity) {\n  a.toast()\n}\n")];
+    assert_eq!(uses_in(&files, "p/Toast.kt", 2, "toast", false), v(&["MyActivity.kt:4:4 E", "MyActivity.kt:5:9 P", "MyActivity.kt:9:4 P"]));
+}
+
+#[test]
 fn java_usages_of_a_kotlin_class() {
     let found = uses(REPO, 7, "Repo", false);
     assert!(found.contains(&"JavaUse.java:2:19 E".to_string()));

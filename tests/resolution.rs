@@ -70,6 +70,17 @@ fn name_search_is_probable() {
 }
 
 #[test]
+fn a_member_missing_from_a_type_that_leaves_the_project_is_probable() {
+    let files = [("/ws/p/Toast.kt", "package p\nimport android.content.Context\nfun Context.toast() {}\n"),
+                 ("/ws/p/MyActivity.kt", "package p\nimport androidx.appcompat.app.AppCompatActivity\nclass MyActivity : AppCompatActivity() {\n  fun f() {\n    this.toast()\n  }\n}\nfun use(a: MyActivity) {\n  a.toast()\n}\n")];
+    // Nothing to go to, as before, but the library supertype may have it.
+    assert_eq!(mem(&files, "/ws/p/MyActivity.kt", 8, "toast"), Some((Probable, vec![])));
+    assert_eq!(mem(&files, "/ws/p/MyActivity.kt", 4, "toast"), Some((Probable, vec![])));
+    let known = [("/ws/p/A.kt", "package p\nopen class Base\nclass A : Base()\nfun use(a: A) {\n  a.toast()\n}\n")];
+    assert_eq!(mem(&known, "/ws/p/A.kt", 4, "toast"), Some((Exact, vec![]))); // the whole chain is in the project
+}
+
+#[test]
 fn top_level_without_a_matching_level_is_probable() {
     let other = [("/ws/b/Repo.kt", "package b\nclass Repo\n"), ("/ws/c/Repo.kt", "package c\nclass Repo\n"), ("/ws/a/Use.kt", "package a\nval r: Repo? = null\n")];
     assert_eq!(mem(&other, "/ws/a/Use.kt", 1, "Repo"), Some((Probable, v(&["Repo.kt:1", "Repo.kt:1"]))));

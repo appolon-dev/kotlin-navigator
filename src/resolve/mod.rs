@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use tree_sitter::Tree;
 
 use self::context::{Receiver, Reference, Role, reference_at};
-use self::members::{Ty, members_named, resolve_type, supertype_members};
+use self::members::{Ty, leaves_project, members_named, resolve_type, supertype_members};
 use self::rank::{DeclRef, prefer, rank, rank_with_level, tier, visible};
 use self::scope::{Implicit, is_property, Local, LocalKind, enclosing_declarations, find_local, implicit_receivers};
 use crate::docs::OpenDoc;
@@ -293,14 +293,16 @@ impl<'a> Resolver<'_, 'a> {
         self.members(&Ty { name: path.to_string(), decls }, true)
     }
 
-    /// Members of `ty`; nothing when the type is known but lacks them, a name search when
-    /// the type is not in the project and no extension matches.
+    /// Members of `ty`; nothing when the type is known but lacks them (probably nothing when
+    /// its supertypes leave the project), a name search when the type is not in the project
+    /// and no extension matches.
     fn members(&self, ty: &Ty<'a>, companion: bool) -> (Vec<Found<'a>>, Certainty) {
         let (found, _) = self.pick(members_named(self.index, ty, self.name, companion));
         if found.is_empty() && ty.decls.is_empty() {
             return self.by_name();
         }
-        (decls(found), Exact)
+        let certainty = if found.is_empty() && leaves_project(self.index, ty) { Probable } else { Exact };
+        (decls(found), certainty)
     }
 
     /// The variable `name` seen from the cursor: a local, a property of an implicit
