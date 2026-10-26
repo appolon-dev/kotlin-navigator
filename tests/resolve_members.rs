@@ -102,3 +102,32 @@ fn mem(files: &[(&str, &str)], from: &str, line: usize, needle: &str) -> Vec<Str
     let files = [("/ws/U.kt", "package p\nval format = 1\nfun format() {}\nfun g() { format() }\n")];
     assert_eq!(mem(&files, "/ws/U.kt", 3, "format"), vec!["cur.kt:2"]);
 }
+#[test] fn private_function_elsewhere_does_not_hide_the_class() {
+    let files = [("/ws/ui/Card.kt", "package ui\n@Composable\nprivate fun Chip(label: String) {}\n"),
+                 ("/ws/U.kt", "package feature\ninternal data class Chip(val label: String)\nfun chips() = listOf(Chip(\"a\"))\n")];
+    assert_eq!(mem(&files, "/ws/U.kt", 2, "Chip"), vec!["cur.kt:1"]);
+}
+#[test] fn local_is_not_visible_in_its_own_initializer() {
+    let files = [("/ws/U.kt", "package p\nfun engine(n: Int) = n\nfun g() {\n  val engine = engine(1)\n  engine\n}\n")];
+    assert_eq!(mem(&files, "/ws/U.kt", 3, "engine("), vec!["cur.kt:1"]);
+    assert_eq!(mem(&files, "/ws/U.kt", 3, "engine ="), vec!["cur.kt:3"]);
+    assert_eq!(mem(&files, "/ws/U.kt", 4, "engine"), vec!["cur.kt:3"]);
+}
+#[test] fn property_in_the_initializer_of_a_same_named_local() {
+    let files = [("/ws/U.kt", "package p\nclass S {\n  val name: String? = null\n  fun g() {\n    val name = name ?: return\n  }\n}\n")];
+    assert_eq!(mem(&files, "/ws/U.kt", 4, "name ?:"), vec!["cur.kt:2"]);
+}
+#[test] fn unknown_receiver_skips_the_enclosing_function() {
+    let files = [("/ws/U.kt", "package p\nclass Db {\n  fun clearAll() = queries.clearAll()\n}\n")];
+    assert!(mem(&files, "/ws/U.kt", 2, "clearAll()\n").is_empty());
+    let files = [("/ws/R.kt", "package p\nclass Repo { fun load() {} }\n"),
+                 ("/ws/U.kt", "package p\nclass Screen {\n  private val api by lazy { Repo() }\n  fun load() { api.load() }\n}\n")];
+    assert_eq!(mem(&files, "/ws/U.kt", 3, "load() }"), vec!["/ws/R.kt:1"]);
+}
+#[test] fn not_null_assertion_and_parentheses_keep_the_receiver() {
+    let files = [("/ws/R.kt", "package p\nclass Repo { fun load() {} }\nclass Other { fun load() {} }\n"),
+                 ("/ws/U.kt", "package p\nfun f(repo: Repo?) {\n  repo!!.load()\n  (repo).load()\n  (repo!!).load()\n}\n")];
+    for line in 2..=4 {
+        assert_eq!(mem(&files, "/ws/U.kt", line, "load"), vec!["/ws/R.kt:1"], "line {line}");
+    }
+}

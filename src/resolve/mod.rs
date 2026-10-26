@@ -11,8 +11,8 @@ use tree_sitter::Tree;
 
 use self::context::{Receiver, Role, reference_at};
 use self::members::{Ty, members_named, resolve_type, supertype_members};
-use self::rank::{DeclRef, prefer, rank, tier};
-use self::scope::{Implicit, Local, LocalKind, find_local, implicit_receivers};
+use self::rank::{DeclRef, prefer, rank, tier, visible};
+use self::scope::{Implicit, Local, LocalKind, enclosing_declarations, find_local, implicit_receivers};
 use crate::index::Index;
 use crate::model::{DeclKind, FileSummary, Flags, Import, Lang, Span};
 use crate::parse::span_at;
@@ -44,6 +44,7 @@ pub fn definition(index: &Index, current: &Current, byte: usize) -> Vec<Target> 
         name: &reference.name,
         role: &reference.role,
         at: reference.range.start,
+        qualified: matches!(reference.receiver, Receiver::Path(_) | Receiver::Unknown),
     };
     if let Role::Import(fqn) = &reference.role {
         return targets(by_fqn(index, fqn));
@@ -62,7 +63,7 @@ pub fn definition(index: &Index, current: &Current, byte: usize) -> Vec<Target> 
             let container = receivers.iter().filter(|r| matches!(r, Implicit::Container(_))).find_map(|r| resolver.ty_of(r));
             let Some(ty) = container else { return Vec::new() };
             let (inherited, _) = supertype_members(index, &ty, &reference.name);
-            targets(rank(index, current.summary, prefer(&reference.role, inherited)))
+            targets(resolver.pick(inherited))
         }
         Receiver::Path(path) => resolver.on_path(path),
         Receiver::Unknown => resolver.by_name(),
@@ -85,6 +86,8 @@ struct Resolver<'a> {
     role: &'a Role,
     /// Start of the identifier.
     at: usize,
+    /// The name follows a receiver: `x.name`.
+    qualified: bool,
 }
 
 impl<'a> Resolver<'a> {
@@ -96,7 +99,7 @@ impl<'a> Resolver<'a> {
         }
         for receiver in implicit_receivers(self.tree, self.text, self.at) {
             let Some(ty) = self.ty_of(&receiver) else { continue };
-            let found = self.rank(prefer(self.role, members_named(self.index, &ty, self.name, true)));
+            let found = self.pick(members_named(self.index, &ty, self.name, true));
             if !found.is_empty() {
                 return targets(found);
             }
@@ -106,7 +109,7 @@ impl<'a> Resolver<'a> {
         }
         let top: Vec<DeclRef> =
             self.index.lookup(self.name).into_iter().filter(|(_, d)| d.container.is_none() || d.kind.is_class_like()).collect();
-        let found = self.rank(prefer(self.role, top));
+        let found = self.pick(top);
         if !found.is_empty() {
             return targets(found);
         }
@@ -170,7 +173,7 @@ impl<'a> Resolver<'a> {
     /// Members of `ty`; nothing when the type is known but lacks them, a name search when
     /// the type is not in the project and no extension matches.
     fn members(&self, ty: &Ty<'a>, companion: bool) -> Vec<Target> {
-        let found = self.rank(prefer(self.role, members_named(self.index, ty, self.name, companion)));
+        let found = self.pick(members_named(self.index, ty, self.name, companion));
         if found.is_empty() && ty.decls.is_empty() {
             return self.by_name();
         }
@@ -207,9 +210,16 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// Every declaration with the name, ranked.
+    /// Every declaration with the name, ranked. After a receiver whose type is unknown, the
+    /// function or property the cursor is in is left out: there it is the caller, as in
+    /// `fun clearAll() = queries.clearAll()`.
     fn by_name(&self) -> Vec<Target> {
-        targets(self.rank(prefer(self.role, self.index.lookup(self.name))))
+        let mut candidates = self.index.lookup(self.name);
+        if self.qualified {
+            let around = enclosing_declarations(self.tree, self.text, self.at, self.name);
+            candidates.retain(|(f, d)| f.path != self.summary.path || !around.contains(&d.name_range));
+        }
+        targets(self.pick(candidates))
     }
 
     fn explicit_import(&self) -> Option<&'a Import> {
@@ -218,6 +228,12 @@ impl<'a> Resolver<'a> {
 
     fn rank(&self, candidates: Vec<DeclRef<'a>>) -> Vec<DeclRef<'a>> {
         rank(self.index, self.summary, candidates)
+    }
+
+    /// The visible candidates of the best kind tier for the role, ranked. Visibility comes
+    /// first: another file's `private fun Chip` must not hide `class Chip`.
+    fn pick(&self, candidates: Vec<DeclRef<'a>>) -> Vec<DeclRef<'a>> {
+        self.rank(prefer(self.role, visible(self.summary, candidates)))
     }
 }
 

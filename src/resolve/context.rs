@@ -111,9 +111,15 @@ fn kotlin_context(text: &str, ident: Node) -> Option<(Role, Receiver)> {
 }
 
 fn receiver_of(text: &str, node: Node) -> Receiver {
+    let inner = |inner: Option<Node>| inner.map_or(Receiver::Unknown, |n| receiver_of(text, n));
     match node.kind() {
         "this_expression" => Receiver::This,
         "super_expression" => Receiver::Super,
+        // `(x).name` and `x!!.name` are on `x`.
+        "parenthesized_expression" => inner(node.named_child(0)),
+        "unary_expression" if node.child_by_field_name("operator").is_some_and(|o| o.kind() == "!!") => {
+            inner(node.child_by_field_name("argument"))
+        }
         _ => dotted_identifiers(text, node).map_or(Receiver::Unknown, Receiver::Path),
     }
 }

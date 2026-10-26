@@ -5,7 +5,8 @@ use std::ops::Range;
 
 use tree_sitter::{Node, Tree};
 
-use crate::parse::{declared, named_child_of_kind, receiver_before, type_child, variables};
+use crate::model::Span;
+use crate::parse::{declared, named_child_of_kind, receiver_before, span_of, type_child, variables};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LocalKind {
@@ -99,7 +100,9 @@ pub fn find_local(tree: &Tree, text: &str, at: usize, name: &str) -> Vec<Local> 
     found
 }
 
-/// Declarations among `scope`'s statements before `at`, last first.
+/// Declarations among `scope`'s statements before `at`, last first. A variable is visible
+/// after its declaration, not in its own initializer; local functions and classes from
+/// their start, for recursion.
 fn statements(text: &str, scope: Node, at: usize, name: &str, out: &mut Vec<Local>) {
     let mut cursor = scope.walk();
     let before: Vec<Node> = scope.named_children(&mut cursor).filter(|s| s.start_byte() < at).collect();
@@ -107,7 +110,9 @@ fn statements(text: &str, scope: Node, at: usize, name: &str, out: &mut Vec<Loca
         match statement.kind() {
             "property_declaration" => {
                 let vars = variables(text, statement);
-                for var in vars.into_iter().rev().filter(|v| &text[v.name.byte_range()] == name) {
+                let declared = statement.end_byte() <= at;
+                let seen = vars.into_iter().rev().filter(|v| declared || v.name.byte_range().contains(&at));
+                for var in seen.filter(|v| &text[v.name.byte_range()] == name) {
                     out.push(Local { range: var.name.byte_range(), kind: LocalKind::Value, type_name: var.type_name, from_call: var.from_call });
                 }
             }
@@ -145,6 +150,22 @@ fn value(range: Range<usize>, type_name: Option<String>) -> Local {
 fn is_property(param: Node) -> bool {
     let mut cursor = param.walk();
     param.children(&mut cursor).any(|c| !c.is_named() && matches!(c.kind(), "val" | "var"))
+}
+
+/// Name spans of the functions and properties called `name` whose declaration contains `at`.
+pub fn enclosing_declarations(tree: &Tree, text: &str, at: usize, name: &str) -> Vec<Span> {
+    let mut out = Vec::new();
+    let mut current = tree.root_node().descendant_for_byte_range(at, at);
+    while let Some(node) = current {
+        let names = match node.kind() {
+            "function_declaration" => node.child_by_field_name("name").into_iter().collect(),
+            "property_declaration" => variables(text, node).into_iter().map(|v| v.name).collect(),
+            _ => Vec::new(),
+        };
+        out.extend(names.into_iter().filter(|n| &text[n.byte_range()] == name).map(|n| span_of(text, n)));
+        current = node.parent();
+    }
+    out
 }
 
 /// Implicit receivers at `at`, innermost first.

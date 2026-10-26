@@ -27,10 +27,14 @@ pub(crate) fn tier(role: &Role, kind: DeclKind) -> Option<usize> {
     fits.then_some(0)
 }
 
+/// Candidates `current` can see: `private` ones only from their own file.
+pub fn visible<'a>(current: &FileSummary, candidates: Vec<DeclRef<'a>>) -> Vec<DeclRef<'a>> {
+    candidates.into_iter().filter(|(f, d)| !d.flags.contains(Flags::PRIVATE) || f.path == current.path).collect()
+}
+
 /// Visibility, stage-1 levels, source set, module order and expect/actual, capped at `MAX_CANDIDATES`.
 pub fn rank<'a>(index: &'a Index, current: &FileSummary, candidates: Vec<DeclRef<'a>>) -> Vec<DeclRef<'a>> {
-    let mut list: Vec<DeclRef> =
-        candidates.into_iter().filter(|(f, d)| !d.flags.contains(Flags::PRIVATE) || f.path == current.path).collect();
+    let mut list = visible(current, candidates);
 
     let levels: [&dyn Fn(&FileSummary, &Decl) -> bool; 4] = [
         &|_, d| current.imports.iter().any(|i| !i.wildcard && i.path == d.fqn),
