@@ -170,7 +170,23 @@ fn function(sink: &mut DeclSink, node: Node, container: Option<u32>) -> bool {
     let index = sink.push(name, None, DeclKind::Function, container) as usize;
     sink.decls[index].receiver = receiver;
     sink.decls[index].flags = modifier_flags(sink.text, node);
+    sink.decls[index].type_hint = result_type(sink.text, node);
     true
+}
+
+/// The declared result type of a function: the first type after the parameter list,
+/// unless it is one of the function's own type parameters.
+fn result_type(text: &str, node: Node) -> Option<String> {
+    let mut cursor = node.walk();
+    let mut after_params = node.named_children(&mut cursor).skip_while(|c| c.kind() != "function_value_parameters").skip(1);
+    let name = type_name(text, after_params.find(|c| TYPES.contains(&c.kind()))?)?;
+    let generic = named_child_of_kind(node, "type_parameters").is_some_and(|tps| {
+        let mut c = tps.walk();
+        tps.named_children(&mut c)
+            .filter(|p| p.kind() == "type_parameter")
+            .any(|p| named_child_of_kind(p, "identifier").is_some_and(|i| ident_text(text, i) == name))
+    });
+    (!generic).then_some(name)
 }
 
 /// One `Property` per declared variable; `val (a, b) = …` declares two.

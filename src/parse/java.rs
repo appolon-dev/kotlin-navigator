@@ -78,6 +78,9 @@ fn visit(sink: &mut DeclSink, node: Node, container: Option<u32>) {
         let index = sink.push(name, None, kind, container);
         sink.decls[index as usize].flags = flags(sink.text, child);
         sink.decls[index as usize].supertypes = supertypes(sink.text, child);
+        if kind == DeclKind::Function {
+            sink.decls[index as usize].type_hint = result_type(sink.text, child);
+        }
         if let Some(params) = child.child_by_field_name("parameters").filter(|_| child.kind() == "record_declaration") {
             let mut c = params.walk();
             for param in params.named_children(&mut c).filter(|p| p.kind() == "formal_parameter") {
@@ -121,4 +124,16 @@ fn supertypes(text: &str, node: Node) -> Vec<String> {
         }
     }
     out
+}
+
+/// The declared result type of a method, unless it is one of the method's own type parameters.
+fn result_type(text: &str, method: Node) -> Option<String> {
+    let name = type_name(text, method.child_by_field_name("type")?)?;
+    let generic = named_child_of_kind(method, "type_parameters").is_some_and(|tps| {
+        let mut c = tps.walk();
+        tps.named_children(&mut c)
+            .filter(|p| p.kind() == "type_parameter")
+            .any(|p| named_child_of_kind(p, "type_identifier").is_some_and(|i| &text[i.byte_range()] == name))
+    });
+    (!generic).then_some(name)
 }

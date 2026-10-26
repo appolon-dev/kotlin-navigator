@@ -33,3 +33,11 @@ fn java_members_and_supertypes() {
     assert_eq!(s.decls[0].supertypes, vec!["Base", "I", "a.K"]);
     assert!(s.decls[1].flags.contains(Flags::PRIVATE));
 }
+
+#[test]
+fn java_method_return_types() {
+    let text = "package j;\nclass J {\n  <T> T get() { return null; }\n  int n() { return 0; }\n  java.util.List<String> l() { return null; }\n  void v() {}\n  Repo r() { return null; }\n}\n";
+    let (_, s) = summarize_text(PathBuf::from("/ws/J.java"), text).unwrap();
+    let hints: Vec<_> = s.decls.iter().skip(1).map(|d| (d.name.as_str(), d.type_hint.as_deref())).collect();
+    assert_eq!(hints, vec![("get", None), ("n", None), ("l", Some("java.util.List")), ("v", None), ("r", Some("Repo"))]);
+}

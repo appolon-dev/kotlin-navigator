@@ -83,7 +83,8 @@ pub struct Decl {
     pub name_range: Span,
     /// Receiver type of an extension: `fun Foo.bar()` → `Foo`.
     pub receiver: Option<String>,
-    /// Type of a property: declared (`val r: Repo?` → `Repo`) or called (`val r = Repo()`, see `Flags::CALL_HINT`).
+    /// Type of a property: declared (`val r: Repo?` → `Repo`) or called (`val r = Repo()`, see `Flags::CALL_HINT`);
+    /// for a function, its declared result type (`fun f(): Repo?` → `Repo`).
     pub type_hint: Option<String>,
     /// Supertypes of a class-like declaration as written, without type arguments.
     pub supertypes: Vec<String>,

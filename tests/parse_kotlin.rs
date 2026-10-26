@@ -178,3 +178,12 @@ fn source_text_ends_with_a_newline() {
     assert_eq!(source_text("class A".to_string()), "class A\n");
     assert_eq!(source_text("class A\n".to_string()), "class A\n");
 }
+
+#[test]
+fn function_return_types() {
+    let s = summary("package p\nfun a(): Repo? = null\nfun <T> b(x: T): T = x\nfun c(): () -> Unit = {}\n\
+fun Repo.d(): List<Repo> = TODO()\nfun e() {}\nfun <T> f(): Box<T> = TODO()\n");
+    let hints: Vec<_> = s.decls.iter().map(|d| (d.name.as_str(), d.type_hint.as_deref())).collect();
+    assert_eq!(hints, vec![("a", Some("Repo")), ("b", None), ("c", None), ("d", Some("List")), ("e", None), ("f", Some("Box"))]);
+    assert_eq!(s.decls[3].receiver.as_deref(), Some("Repo"));
+}
