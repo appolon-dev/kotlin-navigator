@@ -2,7 +2,7 @@
 
 A small language server for **Go to Definition across modules in large Kotlin/Java (Android, KMP) projects**. It never runs Gradle, the Kotlin compiler, a JVM or Android Studio: it parses sources with tree-sitter and keeps a compact declaration index in memory.
 
-This is **stage 3** of the Rust rewrite (designs: `docs/superpowers/specs/2026-10-25-rust-navigator-design.md`, `docs/superpowers/specs/2026-10-26-rust-navigator-stage2-design.md`, `docs/superpowers/specs/2026-10-26-rust-navigator-stage3-design.md`). Stage 1 reached parity with the original Python prototype, now kept in `legacy/`; stage 2 added members and locals; stage 3 adds Find All References, implementations, type definition and highlighting.
+This is **stage 4** of the Rust rewrite (designs: `docs/superpowers/specs/2026-10-25-rust-navigator-design.md`, `docs/superpowers/specs/2026-10-26-rust-navigator-stage2-design.md`, `docs/superpowers/specs/2026-10-26-rust-navigator-stage3-design.md`, `docs/superpowers/specs/2026-10-26-rust-navigator-stage4-design.md`). Stage 1 reached parity with the original Python prototype, now kept in `legacy/`; stage 2 added members and locals; stage 3 added Find All References, implementations, type definition and highlighting; stage 4 adds the Zed extension and prebuilt macOS binaries.
 
 ## What it does
 
@@ -25,32 +25,9 @@ This is **stage 3** of the Rust rewrite (designs: `docs/superpowers/specs/2026-1
 
 ## Install on macOS
 
-1. Install Rust from <https://rustup.rs> if `cargo` is missing.
-2. Keep the ordinary **Kotlin** Zed extension installed.
-3. Run `./install.sh`. It builds a release binary, copies it to `~/.local/share/kotlin-navigator/kotlin-navigator` and prints the Zed settings to merge.
-4. Merge the snippet into `~/.config/zed/settings.json` without replacing unrelated settings. Keep `"arguments": []`: otherwise the arguments of the old Python setup (`-u .../navigator.py`) survive the merge and the server refuses to start.
-5. Restart Zed, open the **repository root**, then `Cmd + Click` a class from another module.
+See **[INSTALL.md](INSTALL.md)**: install the Kotlin Navigator Zed dev extension from `zed-extension/`, and it downloads the prebuilt navigator for your Mac (Apple Silicon or Intel) from GitHub Releases and keeps it up to date. No Rust build of the navigator is needed.
 
-```json
-{
-  "languages": {
-    "Kotlin": {
-      "enable_language_server": true,
-      "language_servers": ["kotlin-language-server", "!kotlin-lsp"]
-    }
-  },
-  "lsp": {
-    "kotlin-language-server": {
-      "binary": {
-        "path": "/Users/YOU/.local/share/kotlin-navigator/kotlin-navigator",
-        "arguments": []
-      }
-    }
-  }
-}
-```
-
-This uses Zed's per-server binary override to run the navigator under the ID of the Kotlin extension's language server.
+**From source.** Install the dev extension as above, then run `./install.sh`: it builds a release binary, copies it to `~/.local/share/kotlin-navigator/kotlin-navigator` and prints the settings to merge, which point `lsp.kotlin-navigator.binary.path` at it. The extension runs that binary instead of downloading one.
 
 ## Limitations
 
@@ -70,10 +47,10 @@ This uses Zed's per-server binary override to run the navigator under the ID of 
 
 ## Diagnostics
 
-Logs go to stderr; view them with `Cmd + Shift + P` → `dev: open language server logs`. Set the level with `KOTLIN_NAVIGATOR_LOG` (`error`, `warn` by default, `info`, `debug`, `trace`) in the `binary.env` section:
+Logs go to stderr; view them with `Cmd + Shift + P` → `dev: open language server logs`. Set the level with `KOTLIN_NAVIGATOR_LOG` (`error`, `warn` by default, `info`, `debug`, `trace`) in `lsp.kotlin-navigator.binary.env`; it applies to the downloaded binary too:
 
 ```json
-"binary": { "path": "...", "arguments": [], "env": { "KOTLIN_NAVIGATOR_LOG": "info" } }
+{ "lsp": { "kotlin-navigator": { "binary": { "env": { "KOTLIN_NAVIGATOR_LOG": "info" } } } } }
 ```
 
 ## Benchmark
@@ -106,14 +83,22 @@ Most lookups without a target are library and generated names (`String`, `Serial
 
 ```bash
 cargo test
+(cd zed-extension && cargo test)                  # the Zed extension
 python3 -m unittest discover -s legacy/tests -v   # Python reference
 ```
 
 Two legacy tests fail on macOS because the prototype resolves `/var` to `/private/var` while the tests compare unresolved temp paths; that behaviour is left as it was.
 
+## Releasing
+
+1. Bump `version` in `Cargo.toml` and commit.
+2. `git tag vX.Y.Z && git push origin vX.Y.Z`. The `release` workflow (`.github/workflows/release.yml`) runs the tests, builds `aarch64-apple-darwin` and `x86_64-apple-darwin` for macOS 11 and later, and publishes `kotlin-navigator-<target>.tar.gz` with a `.sha256` for each. Users get it on their next Zed start.
+
+A tag with a suffix (`vX.Y.Z-rc.1`) becomes a pre-release, which the extension skips: download it by hand to check a build before everyone gets it. `scripts/package-release.sh <tag>` runs the same build and checks locally and leaves the archives in `dist/`.
+
 ## Rolling back to Python
 
-`install.sh` leaves `~/.local/share/kotlin-navigator/navigator.py` in place. Point `binary.path` back to `python3` with `"arguments": ["-u", "/Users/YOU/.local/share/kotlin-navigator/navigator.py"]`; `legacy/install.sh` reinstalls it.
+`install.sh` leaves `~/.local/share/kotlin-navigator/navigator.py` in place. Remove `kotlin-navigator` and `!kotlin-language-server` from `language_servers` and point `lsp.kotlin-language-server.binary.path` back to `python3` with `"arguments": ["-u", "/Users/YOU/.local/share/kotlin-navigator/navigator.py"]`; `legacy/install.sh` reinstalls it.
 
 ## License
 

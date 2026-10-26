@@ -12,18 +12,16 @@ mkdir -p "$DIR"
 cp target/release/kotlin-navigator "$DIR/kotlin-navigator.new"
 mv -f "$DIR/kotlin-navigator.new" "$DIR/kotlin-navigator"
 printf '\nInstalled %s\n' "$DIR/kotlin-navigator"
-printf '\nMerge this snippet into ~/.config/zed/settings.json, then restart Zed.\n'
-printf 'Keep "arguments": [] so arguments of the old Python setup are dropped.\n\n'
+printf '\nThis build runs through the Kotlin Navigator Zed extension: install it first (INSTALL.md, steps 1-3).\n'
+printf 'Then merge this snippet into ~/.config/zed/settings.json and restart Zed.\n\n'
 cat <<EOF
 {
   "languages": {
-    "Kotlin": {
-      "enable_language_server": true,
-      "language_servers": ["kotlin-language-server", "!kotlin-lsp"]
-    }
+    "Kotlin": { "language_servers": ["kotlin-navigator", "!kotlin-language-server", "!kotlin-lsp", "..."] },
+    "Java": { "language_servers": ["kotlin-navigator", "!jdtls", "..."] }
   },
   "lsp": {
-    "kotlin-language-server": {
+    "kotlin-navigator": {
       "binary": {
         "path": "$DIR/kotlin-navigator",
         "arguments": []
