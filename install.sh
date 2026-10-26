@@ -8,7 +8,9 @@ cd "$(dirname "$0")"
 cargo build --release
 DIR="$HOME/.local/share/kotlin-navigator"
 mkdir -p "$DIR"
-cp target/release/kotlin-navigator "$DIR/kotlin-navigator"
+# Replace by rename: overwriting a binary that already ran makes macOS kill new launches of it.
+cp target/release/kotlin-navigator "$DIR/kotlin-navigator.new"
+mv -f "$DIR/kotlin-navigator.new" "$DIR/kotlin-navigator"
 printf '\nInstalled %s\n' "$DIR/kotlin-navigator"
 printf '\nMerge this snippet into ~/.config/zed/settings.json, then restart Zed.\n'
 printf 'Keep "arguments": [] so arguments of the old Python setup are dropped.\n\n'
