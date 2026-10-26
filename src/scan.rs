@@ -1,6 +1,7 @@
 //! Workspace walk (gitignore-aware) and parallel initial indexing.
 
 use std::collections::{BTreeSet, HashMap};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -9,11 +10,16 @@ use ignore::WalkBuilder;
 use rayon::prelude::*;
 
 use crate::index::Index;
+use crate::model::FileSummary;
 use crate::parse::summarize_text;
 
 /// Directories skipped even when no ignore file mentions them (same list as the Python version).
 pub const SKIP_DIRS: [&str; 6] = ["build", "out", "target", "bin", "node_modules", "generated"];
 pub const MAX_FILE_SIZE: u64 = 2 * 1024 * 1024;
+/// Files parsed and published to the live index at a time during the initial scan.
+pub const CHUNK: usize = 512;
+/// `git ls-files` on a huge or locked repository must not hold up indexing.
+pub const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
 pub struct ScanStats {
@@ -88,21 +94,13 @@ pub fn module_of(path: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
     })
 }
 
-/// `.kt`/`.java` files tracked by git under `root`; empty when git or the repository is unavailable.
+/// `.kt`/`.java` files tracked by git under `root`; empty when git or the repository is
+/// unavailable, or git takes longer than `GIT_TIMEOUT`.
 fn git_tracked_sources(root: &Path) -> Vec<PathBuf> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["ls-files", "-z", "--", "*.kt", "*.java"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output();
-    let Ok(output) = output else { return Vec::new() };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    output
-        .stdout
+    let mut command = Command::new("git");
+    command.arg("-C").arg(root).args(["ls-files", "-z", "--", "*.kt", "*.java"]);
+    let Some(stdout) = output_within(&mut command, GIT_TIMEOUT) else { return Vec::new() };
+    stdout
         .split(|b| *b == 0)
         .filter_map(|rel| std::str::from_utf8(rel).ok())
         .filter(|rel| !rel.is_empty())
@@ -110,34 +108,65 @@ fn git_tracked_sources(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The command's stdout if it exits successfully within `timeout`; otherwise it is killed and `None`.
+pub fn output_within(command: &mut Command, timeout: Duration) -> Option<Vec<u8>> {
+    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    // A full pipe would block the child, so it is drained while we wait.
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).map(|_| out)
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < timeout => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let out = reader.join().ok()?.ok()?;
+    status.success().then_some(out)
+}
+
 pub fn read_source(path: &Path) -> Option<String> {
     String::from_utf8(std::fs::read(path).ok()?).ok()
 }
 
 pub fn build_index(roots: &[PathBuf]) -> (Index, ScanStats) {
+    let mut index = Index::default();
+    let stats = build_index_with(roots, &mut |chunk| chunk.into_iter().for_each(|summary| index.upsert(summary)));
+    (index, stats)
+}
+
+/// Parses the workspace in chunks of `CHUNK` files, handing each chunk to `publish` as it is ready.
+pub fn build_index_with(roots: &[PathBuf], publish: &mut dyn FnMut(Vec<FileSummary>)) -> ScanStats {
     let started = Instant::now();
     let paths = walk_sources(roots);
-    let summaries: Vec<_> = paths
-        .par_iter()
-        .map(|path| summarize_text(path.clone(), &read_source(path)?).map(|(_, summary)| summary))
-        .collect();
-    let skipped = summaries.iter().filter(|s| s.is_none()).count();
-    let mut index = Index::default();
-    let mut error_files = 0;
+    let mut stats = ScanStats { files: 0, skipped: 0, decls: 0, error_files: 0, elapsed: Duration::ZERO };
     // Files of one directory share a module: look it up once per directory.
     let mut modules: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
-    for mut summary in summaries.into_iter().flatten() {
-        error_files += usize::from(summary.has_errors);
-        let dir = summary.path.parent().map(Path::to_path_buf).unwrap_or_default();
-        summary.module = modules.entry(dir).or_insert_with(|| module_of(&summary.path, roots)).clone();
-        index.upsert(summary);
+    for chunk in paths.chunks(CHUNK) {
+        let summaries: Vec<_> = chunk
+            .par_iter()
+            .map(|path| summarize_text(path.clone(), &read_source(path)?).map(|(_, summary)| summary))
+            .collect();
+        stats.skipped += summaries.iter().filter(|s| s.is_none()).count();
+        let mut ready = Vec::with_capacity(summaries.len());
+        for mut summary in summaries.into_iter().flatten() {
+            stats.error_files += usize::from(summary.has_errors);
+            stats.decls += summary.decls.len();
+            let dir = summary.path.parent().map(Path::to_path_buf).unwrap_or_default();
+            summary.module = modules.entry(dir).or_insert_with(|| module_of(&summary.path, roots)).clone();
+            ready.push(summary);
+        }
+        stats.files += ready.len();
+        publish(ready);
     }
-    let stats = ScanStats {
-        files: index.file_count(),
-        skipped,
-        decls: index.decl_count(),
-        error_files,
-        elapsed: started.elapsed(),
-    };
-    (index, stats)
+    stats.elapsed = started.elapsed();
+    stats
 }

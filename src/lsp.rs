@@ -5,6 +5,7 @@ use std::any::Any;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
@@ -18,6 +19,7 @@ use lsp_types::{
     SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use serde_json::{Value, json};
+use tree_sitter::Tree;
 
 use crate::docs::{self, Documents, path_to_uri, uri_to_path};
 use crate::index::Index;
@@ -72,8 +74,9 @@ impl State {
     }
 
     pub fn open_or_change(&self, path: PathBuf, text: String) {
+        let module = scan::module_of(&path, &self.roots);
         let mut docs = write(&self.docs);
-        let Some(doc) = docs.set(path.clone(), text) else { return };
+        let Some(doc) = docs.set(path.clone(), text, module) else { return };
         let mut index = write(&self.index);
         if self.indexable(&index, &path) {
             index.upsert(doc.summary.clone());
@@ -91,26 +94,50 @@ impl State {
         if docs.get(path).is_some() || !self.indexable(&read(&self.index), path) {
             return;
         }
-        let summary = scan::read_source(path).and_then(|text| parse::summarize_text(path.to_path_buf(), &text));
+        let summary = self.read_from_disk(path);
         let mut index = write(&self.index);
         match summary {
-            Some((_, summary)) => index.upsert(summary),
+            Some((_, _, summary)) => index.upsert(summary),
             None => index.remove(path),
         }
     }
 
-    /// Installs the freshly built index; open buffers win over what was read from disk.
-    pub fn finish_indexing(&self, mut index: Index) {
+    fn read_from_disk(&self, path: &Path) -> Option<(String, Tree, FileSummary)> {
+        let text = scan::read_source(path)?;
+        let (tree, mut summary) = parse::summarize_text(path.to_path_buf(), &text)?;
+        summary.module = scan::module_of(path, &self.roots);
+        Some((text, tree, summary))
+    }
+
+    /// Adds scanned files to the live index; an open buffer wins over what was read from disk.
+    pub fn publish(&self, summaries: Vec<FileSummary>) {
         let docs = read(&self.docs);
-        for doc in docs.iter() {
-            if self.indexable(&index, &doc.summary.path) {
-                index.upsert(doc.summary.clone());
+        let mut index = write(&self.index);
+        for summary in summaries {
+            match docs.get(&summary.path) {
+                Some(doc) => index.upsert(doc.summary.clone()),
+                None => index.upsert(summary),
             }
         }
-        *write(&self.index) = index;
-        drop(docs);
-        self.mark_ready();
     }
+}
+
+/// Runs `scan` on its own thread, publishing what it hands over; the server is marked
+/// ready when it ends, even by a panic.
+pub fn index_in_background(
+    state: Arc<State>,
+    scan: impl FnOnce(&mut dyn FnMut(Vec<FileSummary>)) + Send + 'static,
+) -> JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("indexer".into())
+        .spawn(move || {
+            let scanned = panic::catch_unwind(AssertUnwindSafe(|| scan(&mut |chunk| state.publish(chunk))));
+            if let Err(panic) = scanned {
+                log::error!("panic in the indexer: {}", panic_message(panic.as_ref()));
+            }
+            state.mark_ready();
+        })
+        .expect("the indexer thread starts")
 }
 
 fn read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
@@ -128,9 +155,8 @@ pub fn definition(state: &State, path: &Path, position: Position) -> Vec<Locatio
     let (text, tree, summary) = match docs.get(path) {
         Some(doc) => (&doc.text, &doc.tree, &doc.summary),
         None => {
-            let Some(text) = scan::read_source(path) else { return Vec::new() };
-            let Some((tree, summary)) = parse::summarize_text(path.to_path_buf(), &text) else { return Vec::new() };
-            from_disk = (text, tree, summary);
+            let Some(read) = state.read_from_disk(path) else { return Vec::new() };
+            from_disk = read;
             (&from_disk.0, &from_disk.1, &from_disk.2)
         }
     };
@@ -216,10 +242,9 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
         }),
     )?;
 
-    let state = State::new(roots, READY_TIMEOUT);
-    let indexer_state = Arc::clone(&state);
-    std::thread::Builder::new().name("indexer".into()).spawn(move || {
-        let (index, stats) = scan::build_index(&indexer_state.roots);
+    let state = State::new(roots.clone(), READY_TIMEOUT);
+    index_in_background(Arc::clone(&state), move |publish| {
+        let stats = scan::build_index_with(&roots, publish);
         log::info!(
             "indexed {} files, {} declarations ({} with parse errors, {} unreadable) in {} ms",
             stats.files,
@@ -228,8 +253,7 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
             stats.skipped,
             stats.elapsed.as_millis()
         );
-        indexer_state.finish_indexing(index);
-    })?;
+    });
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(REQUEST_THREADS)

@@ -70,3 +70,22 @@ fn module_is_the_nearest_dir_with_a_build_script() {
     let a = idx.file(&r.join("core/src/commonMain/kotlin/a/A.kt")).unwrap();
     assert_eq!((a.module.clone(), a.source_set.as_deref()), (Some(r.join("core")), Some("commonMain")));
 }
+
+#[test]
+fn slow_commands_are_killed_at_the_timeout() {
+    let started = std::time::Instant::now();
+    let out = kotlin_navigator::scan::output_within(std::process::Command::new("sleep").arg("5"), std::time::Duration::from_millis(200));
+    assert_eq!(out, None);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    let ok = kotlin_navigator::scan::output_within(std::process::Command::new("printf").arg("ok"), std::time::Duration::from_secs(5));
+    assert_eq!(ok.as_deref(), Some(&b"ok"[..]));
+}
+
+#[test]
+fn index_is_published_in_chunks() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..600 { write(dir.path(), &format!("a/F{i}.kt"), format!("class F{i}\n").as_bytes()); }
+    let mut sizes = Vec::new();
+    let stats = kotlin_navigator::scan::build_index_with(&[dir.path().to_path_buf()], &mut |chunk| sizes.push(chunk.len()));
+    assert_eq!((sizes, stats.files), (vec![512, 88], 600));
+}

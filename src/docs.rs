@@ -59,9 +59,11 @@ pub struct Documents {
 }
 
 impl Documents {
-    /// Parses and stores the buffer; `None` for languages we do not parse.
-    pub fn set(&mut self, path: PathBuf, text: String) -> Option<&OpenDoc> {
-        let (tree, summary) = parse::summarize_text(path.clone(), &text)?;
+    /// Parses and stores the buffer of a file in Gradle module `module`; `None` for
+    /// languages we do not parse.
+    pub fn set(&mut self, path: PathBuf, text: String, module: Option<PathBuf>) -> Option<&OpenDoc> {
+        let (tree, mut summary) = parse::summarize_text(path.clone(), &text)?;
+        summary.module = module;
         self.docs.insert(path.clone(), OpenDoc { text, tree, summary });
         self.docs.get(&path)
     }

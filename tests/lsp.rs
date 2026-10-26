@@ -1,7 +1,7 @@
 mod support;
 use kotlin_navigator::lsp::{self, State};
 use serde_json::json;
-use std::{fs, path::PathBuf, time::{Duration, Instant}};
+use std::{fs, path::PathBuf, sync::Arc, time::{Duration, Instant}};
 use support::{uri, Client};
 
 const DOMAIN_TEXT: &str = "package com.example.domain\nclass StakingRepository {}\n";
@@ -119,5 +119,58 @@ fn buffers_where_the_scan_does_not_look_navigate_but_stay_out_of_the_index() {
     // A new file in an ordinary source directory is indexed as soon as it is opened.
     open(&c, &dir.path().join("domain/src/Fresh.kt"), "package com.example.domain\nclass Fresh\n");
     assert_eq!(symbols(&mut c, "Fresh").len(), 1);
+    c.shutdown();
+}
+
+fn summary(path: &str, text: &str) -> kotlin_navigator::model::FileSummary {
+    kotlin_navigator::parse::summarize_text(PathBuf::from(path), text).unwrap().1
+}
+
+#[test]
+fn after_the_timeout_requests_use_the_published_part() {
+    let state = State::new(Vec::new(), Duration::from_millis(50));
+    state.publish(vec![summary("/ws/a/Repo.kt", "package a\nclass Repo\n")]);
+    let path = PathBuf::from("/ws/a/Use.kt");
+    state.open_or_change(path.clone(), "package a\nval r: Repo? = null\n".into());
+    let locs = lsp::definition(&state, &path, lsp_types::Position { line: 1, character: 8 });
+    assert_eq!(locs.len(), 1);
+    assert!(locs[0].uri.as_str().ends_with("/ws/a/Repo.kt"));
+}
+
+#[test]
+fn published_file_keeps_its_open_buffer() {
+    let state = State::new(Vec::new(), Duration::from_millis(10));
+    state.open_or_change(PathBuf::from("/ws/a/Repo.kt"), "package a\nclass Fresh\n".into());
+    state.publish(vec![summary("/ws/a/Repo.kt", "package a\nclass Repo\n")]);
+    assert_eq!((lsp::workspace_symbols(&state, "Fresh").len(), lsp::workspace_symbols(&state, "Repo").len()), (1, 0));
+}
+
+#[test]
+fn indexer_panic_still_marks_ready() {
+    let state = State::new(Vec::new(), Duration::from_secs(10));
+    lsp::index_in_background(Arc::clone(&state), |publish| {
+        publish(vec![summary("/ws/a/Repo.kt", "package a\nclass Repo\n")]);
+        panic!("boom");
+    }).join().unwrap();
+    let started = Instant::now();
+    assert!(state.wait_ready());
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(lsp::workspace_symbols(&state, "Repo").len(), 1);
+}
+
+#[test]
+fn member_definition_over_lsp() {
+    let dir = tempfile::tempdir().unwrap();
+    let domain = dir.path().join("domain/src/Repo.kt");
+    let feature = dir.path().join("feature/src/Vm.kt");
+    for (p, t) in [(&domain, "package d\nclass Repo {\n  fun stake() {}\n}\n"),
+                   (&feature, "package f\nimport d.Repo\nclass Vm(val repo: Repo) {\n  fun go() { repo.stake() }\n}\n")] {
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, t).unwrap();
+    }
+    let mut c = Client::start(dir.path());
+    let res = c.request("textDocument/definition", json!({"textDocument": {"uri": uri(&feature)}, "position": {"line": 3, "character": 18}})).unwrap();
+    assert_eq!(res[0]["uri"], uri(&domain));
+    assert_eq!(res[0]["range"]["start"], json!({"line": 2, "character": 6}));
     c.shutdown();
 }
