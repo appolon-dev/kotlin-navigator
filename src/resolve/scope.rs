@@ -58,7 +58,8 @@ pub fn find_local(tree: &Tree, text: &str, at: usize, name: &str) -> Vec<Local> 
             }
             "function_declaration" | "secondary_constructor" => {
                 in_body = true;
-                if let Some(params) = named_child_of_kind(node, "function_value_parameters") {
+                // Not on the function's own name: `fun title(title: String)`.
+                if let Some(params) = named_child_of_kind(node, "function_value_parameters").filter(|p| at >= p.start_byte()) {
                     let mut cursor = params.walk();
                     for param in params.named_children(&mut cursor).filter(|p| p.kind() == "parameter") {
                         parameter(text, param, name, &mut here);
@@ -84,7 +85,8 @@ pub fn find_local(tree: &Tree, text: &str, at: usize, name: &str) -> Vec<Local> 
                 }
             }
             "class_declaration" if !in_body => {
-                let params = named_child_of_kind(node, "primary_constructor").and_then(|p| named_child_of_kind(p, "class_parameters"));
+                let constructor = named_child_of_kind(node, "primary_constructor").filter(|p| at >= p.start_byte());
+                let params = constructor.and_then(|p| named_child_of_kind(p, "class_parameters"));
                 if let Some(params) = params {
                     let mut cursor = params.walk();
                     for param in params.named_children(&mut cursor).filter(|p| p.kind() == "class_parameter" && !is_property(*p)) {

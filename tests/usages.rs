@@ -119,6 +119,13 @@ fn labels_of_a_function_named_like_its_parameter() {
 }
 
 #[test]
+fn on_its_name_a_function_is_not_its_parameter() {
+    let files = [("p/T.kt", "package p\nclass Label\ninterface T {\n  fun title(title: Label): T\n}\nclass B : T {\n  override fun title(title: Label): T = this\n}\nfun use(t: T) = t.title(title = Label())\n")];
+    assert_eq!(uses_in(&files, "p/T.kt", 3, "title", false), v(&["T.kt:6:15 E", "T.kt:8:18 E"])); // the override and the call
+    assert_eq!(uses_in(&files, "p/T.kt", 3, "title:", false), v(&["T.kt:8:24 E"]));                // the label, not the function's name
+}
+
+#[test]
 fn a_set_flag_cancels_the_search() {
     let (index, _) = build_index(&[root()]);
     let sources = Sources::default();

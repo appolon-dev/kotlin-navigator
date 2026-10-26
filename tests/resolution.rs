@@ -102,6 +102,17 @@ fn labels_of_local_functions_constructors_and_missing_parameters() {
 }
 
 #[test]
+fn parameters_are_not_seen_before_their_list() {
+    let fun = [("/ws/p/T.kt", "package p\nclass Label\ninterface T {\n  fun title(title: Label): T\n}\n")];
+    assert_eq!(mem(&fun, "/ws/p/T.kt", 3, "title"), Some((Exact, v(&["T.kt:3"]))));
+    assert_eq!(mem(&fun, "/ws/p/T.kt", 3, "title:"), Some((Exact, v(&["T.kt:3 local"]))));
+    assert_eq!(mem_type(&fun, "/ws/p/T.kt", 3, "title"), ["T.kt:2"]); // the result type, not the parameter's
+    let class = [("/ws/p/C.kt", "package p\nconst val tag = \"t\"\n@Named(tag) class C(tag: String) {\n  val t = tag\n}\n")];
+    assert_eq!(mem(&class, "/ws/p/C.kt", 2, "tag"), Some((Exact, v(&["C.kt:1"]))));
+    assert_eq!(mem(&class, "/ws/p/C.kt", 3, "tag"), Some((Exact, v(&["C.kt:2 local"]))));
+}
+
+#[test]
 fn on_a_declaration_the_target_is_that_declaration() {
     let platform = "core/src/commonMain/kotlin/com/fx/core/Platform.kt";
     assert_eq!(how(platform, 2, "platformName").map(|(_, t)| t.len()), Some(3)); // definition lists the actuals too

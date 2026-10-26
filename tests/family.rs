@@ -30,6 +30,16 @@ fn impls(rel: &str, line: usize, needle: &str) -> Vec<String> {
     implementation(&index, &current, &sources, byte_of(&doc.text, line, needle), &Cancel::default()).unwrap()
         .iter().map(|t| format!("{}:{}", t.path.file_name().unwrap().to_string_lossy(), t.range.line)).collect()
 }
+/// The same over files that exist only in memory.
+fn mem_impls(files: &[(&str, &str)], from: &str, line: usize, needle: &str) -> Vec<String> {
+    let mut index = Index::default();
+    for (p, t) in files { index.upsert(summarize_text(PathBuf::from(p), t).unwrap().1); }
+    let text = files.iter().find(|(p, _)| *p == from).unwrap().1;
+    let (tree, summary) = summarize_text(PathBuf::from(from), text).unwrap();
+    let current = Current { text, tree: &tree, summary: &summary };
+    implementation(&index, &current, &Sources::default(), byte_of(text, line, needle), &Cancel::default()).unwrap()
+        .iter().map(|t| format!("{}:{}", t.path.file_name().unwrap().to_string_lossy(), t.range.line)).collect()
+}
 
 #[test]
 fn subtypes_are_direct_and_indirect() {
@@ -79,6 +89,12 @@ fn deep_and_cyclic_hierarchies() {
 fn implementation_from_a_reference() {
     assert_eq!(impls("app/src/commonMain/kotlin/com/fx/app/Usages.kt", 7, "ping"), ["Cache.kt:3", "Repo.kt:8"]);
     assert_eq!(impls("app/src/commonMain/kotlin/com/fx/app/Screen.kt", 11, "Repo"), ["Cache.kt:2"]);
+}
+
+#[test]
+fn implementation_of_a_function_named_like_its_parameter() {
+    let files = [("/ws/p/T.kt", "package p\ninterface T {\n  fun title(title: String): T\n}\nclass B : T {\n  override fun title(title: String): T = this\n}\n")];
+    assert_eq!(mem_impls(&files, "/ws/p/T.kt", 2, "title"), ["T.kt:5"]);
 }
 
 #[test]
