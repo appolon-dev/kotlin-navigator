@@ -91,25 +91,32 @@ impl State {
         self.reload_from_disk(path);
     }
 
-    /// Re-reads a file that is not open in the editor; a missing or unreadable file leaves the index.
+    /// Re-reads a file that is not open in the editor; a missing or unreadable file leaves the
+    /// index, one whose parse gives up keeps what was indexed.
     pub fn reload_from_disk(&self, path: &Path) {
         let docs = read(&self.docs);
         if docs.get(path).is_some() || !self.indexable(&read(&self.index), path) {
             return;
         }
-        let summary = self.read_from_disk(path);
-        let mut index = write(&self.index);
-        match summary {
-            Some((_, _, summary)) => index.upsert(summary),
-            None => index.remove(path),
+        let Some(text) = scan::read_source(path) else {
+            write(&self.index).remove(path);
+            return;
+        };
+        if let Some((_, summary)) = self.parse_from_disk(path, &text) {
+            write(&self.index).upsert(summary);
         }
     }
 
     fn read_from_disk(&self, path: &Path) -> Option<(String, Tree, FileSummary)> {
         let text = scan::read_source(path)?;
-        let (tree, mut summary) = parse::summarize_text(path.to_path_buf(), &text)?;
-        summary.module = scan::module_of(path, &self.roots);
+        let (tree, summary) = self.parse_from_disk(path, &text)?;
         Some((text, tree, summary))
+    }
+
+    fn parse_from_disk(&self, path: &Path, text: &str) -> Option<(Tree, FileSummary)> {
+        let (tree, mut summary) = parse::summarize_text(path.to_path_buf(), text)?;
+        summary.module = scan::module_of(path, &self.roots);
+        Some((tree, summary))
     }
 
     /// Adds scanned files to the live index; an open buffer wins over what was read from disk.

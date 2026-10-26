@@ -201,3 +201,14 @@ fn a_runaway_parse_keeps_the_previous_buffer() {
     assert_eq!(repository_definition(&mut c, &feature)[0]["uri"], uri(&domain));
     c.shutdown();
 }
+
+#[test]
+fn a_runaway_parse_on_disk_keeps_the_indexed_declarations() {
+    let (dir, domain, _) = workspace();
+    let mut c = Client::start(dir.path());
+    assert_eq!(symbols(&mut c, "StakingRepository").len(), 1); // the first scan is over
+    fs::write(&domain, include_str!("fixtures/slow_backtick.kt")).unwrap();
+    c.notify("workspace/didChangeWatchedFiles", json!({"changes": [{"uri": uri(&domain), "type": 2}]}));
+    assert_eq!(symbols(&mut c, "StakingRepository").len(), 1);
+    c.shutdown();
+}
