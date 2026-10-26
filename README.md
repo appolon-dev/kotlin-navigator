@@ -114,3 +114,7 @@ Two legacy tests fail on macOS because the prototype resolves `/var` to `/privat
 ## Rolling back to Python
 
 `install.sh` leaves `~/.local/share/kotlin-navigator/navigator.py` in place. Point `binary.path` back to `python3` with `"arguments": ["-u", "/Users/YOU/.local/share/kotlin-navigator/navigator.py"]`; `legacy/install.sh` reinstalls it.
+
+## License
+
+MIT, see `LICENSE`.
