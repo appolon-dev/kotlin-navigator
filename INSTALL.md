@@ -38,7 +38,7 @@ Kotlin Navigator comes first, so Zed asks it for Go to Definition. The JVM langu
 ## 5. First run
 
 1. Open the **repository root** of your project (`File → Open`), not a single module.
-2. Open a `.kt` file. The first time, the status bar shows the navigator being downloaded (about 1 MB). Indexing takes 1–2 s for 5 000 files.
+2. Open a `.kt` file. The first time, the status bar shows the navigator being downloaded (about 2 MB). Indexing takes 1–2 s for 5 000 files.
 3. `Cmd + Click` a class from another module.
 
 ## 6. Updating
