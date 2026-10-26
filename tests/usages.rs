@@ -103,6 +103,13 @@ fn a_shadowing_local_is_not_a_property_usage() {
 }
 
 #[test]
+fn a_subject_of_many_targets_joins_their_families() {
+    let files = [("p/N.kt", "package p\ninterface Named {\n  val name: String\n}\nclass A : Named {\n  override val name = \"a\"\n}\nclass B : Named {\n  override val name = \"b\"\n}\nclass C {\n  val name = \"c\"\n}\nfun f(n: Named, xs: List<Any>) = n.name + xs.map { it.name }\n")];
+    assert_eq!(uses_in(&files, "p/N.kt", 13, "name }", true),
+               v(&["N.kt:2:6 E", "N.kt:5:15 E", "N.kt:8:15 E", "N.kt:11:6 E", "N.kt:13:35 E", "N.kt:13:54 P"]));
+}
+
+#[test]
 fn overloads_share_their_calls() {
     let files = [("p/R.kt", "package p\nclass R {\n  fun go(a: Int) {}\n  fun go(a: String) {}\n}\nfun call(r: R) { r.go(1) }\n")];
     assert_eq!(uses_in(&files, "p/R.kt", 2, "go", false), v(&["R.kt:5:19 E"]));

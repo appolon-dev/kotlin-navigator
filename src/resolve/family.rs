@@ -26,38 +26,35 @@ fn ordered(mut list: Vec<DeclRef>) -> Vec<DeclRef> {
     list
 }
 
-/// Subtype search over one index: the map of heirs is built once, subtypes once per class.
-struct Hierarchy<'a> {
+/// The subtype search of one request: the map of heirs is built on first use, which only a
+/// class or a member of one needs, and the subtypes of each class once.
+pub(crate) struct Hierarchy<'a> {
     index: &'a Index,
     /// Last segment of a written supertype -> the classes that name it.
-    heirs: HashMap<&'a str, Vec<DeclRef<'a>>>,
+    heirs: Option<HashMap<&'a str, Vec<DeclRef<'a>>>>,
     cache: HashMap<Key, Vec<DeclRef<'a>>>,
 }
 
 impl<'a> Hierarchy<'a> {
-    fn new(index: &'a Index) -> Self {
-        let mut heirs: HashMap<&str, Vec<DeclRef<'a>>> = HashMap::new();
-        for (file, decl) in index.decls().filter(|(_, d)| d.kind.is_class_like()) {
-            for written in &decl.supertypes {
-                heirs.entry(written.rsplit('.').next().unwrap_or(written)).or_default().push((file, decl));
-            }
-        }
-        Hierarchy { index, heirs, cache: HashMap::new() }
+    pub(crate) fn new(index: &'a Index) -> Self {
+        Hierarchy { index, heirs: None, cache: HashMap::new() }
     }
 
     fn subtypes(&mut self, class: DeclRef<'a>, cancel: &Cancel) -> Result<Vec<DeclRef<'a>>, Cancelled> {
         if let Some(done) = self.cache.get(&key(class)) {
             return Ok(done.clone());
         }
+        let index = self.index;
+        let heirs = self.heirs.get_or_insert_with(|| heirs_of(index));
         let mut seen: HashSet<Key> = HashSet::from([key(class)]);
         let mut queue = VecDeque::from([class]);
         let mut found = Vec::new();
         while let Some(current) = queue.pop_front() {
             cancel.check()?;
             let (current_file, current_decl) = current;
-            for &(file, decl) in self.heirs.get(current_decl.name.as_str()).into_iter().flatten() {
+            for &(file, decl) in heirs.get(current_decl.name.as_str()).into_iter().flatten() {
                 let names_current = decl.supertypes.iter().filter(|w| w.rsplit('.').next() == Some(current_decl.name.as_str())).any(|w| {
-                    resolve_type(self.index, file, w).iter().any(|&r| key(r) == key((current_file, current_decl)))
+                    resolve_type(index, file, w).iter().any(|&r| key(r) == key((current_file, current_decl)))
                 });
                 if names_current && seen.insert(key((file, decl))) {
                     found.push((file, decl));
@@ -79,6 +76,64 @@ impl<'a> Hierarchy<'a> {
             .filter(|(_, d)| d.flags.contains(Flags::OVERRIDE))
             .collect())
     }
+
+    /// `decl` with everything it overrides, everything overriding it, and its expect/actual
+    /// counterparts.
+    pub(crate) fn family(&mut self, decl: DeclRef<'a>, cancel: &Cancel) -> Result<Vec<DeclRef<'a>>, Cancelled> {
+        let index = self.index;
+        let mut seen: HashSet<Key> = HashSet::from([key(decl)]);
+        let mut work = vec![decl];
+        let mut all = vec![decl];
+        while let Some((file, d)) = work.pop() {
+            cancel.check()?;
+            let mut related: Vec<DeclRef> = Vec::new();
+            if let Some(class) = owner(file, d) {
+                if d.flags.contains(Flags::OVERRIDE) {
+                    let ty = Ty { name: class.1.name.clone(), decls: vec![class] };
+                    related.extend(supertype_members(index, &ty, &d.name).0);
+                }
+                related.extend(self.overrides(class, &d.name, cancel)?);
+            }
+            if is_pair((file, d)) {
+                related.extend(by_fqn(index, &d.fqn).into_iter().filter(|&o| is_pair(o)));
+            }
+            for r in related {
+                if seen.insert(key(r)) {
+                    work.push(r);
+                    all.push(r);
+                }
+            }
+        }
+        Ok(ordered(all))
+    }
+
+    /// What implements or overrides `decl`: subtypes of a class, overrides of a member, the
+    /// actuals of an `expect`.
+    pub(crate) fn implementations(&mut self, decl: DeclRef<'a>, cancel: &Cancel) -> Result<Vec<DeclRef<'a>>, Cancelled> {
+        let (file, d) = decl;
+        let mut found = if d.kind.is_class_like() {
+            self.subtypes(decl, cancel)?
+        } else if let Some(class) = owner(file, d) {
+            self.overrides(class, &d.name, cancel)?
+        } else {
+            Vec::new()
+        };
+        if is_expect(file, d) {
+            found.extend(by_fqn(self.index, &d.fqn).into_iter().filter(|(_, o)| o.flags.contains(Flags::ACTUAL)));
+        }
+        Ok(ordered(found))
+    }
+}
+
+/// Last segment of a written supertype -> the class-like declarations that name it.
+fn heirs_of(index: &Index) -> HashMap<&str, Vec<DeclRef<'_>>> {
+    let mut heirs: HashMap<&str, Vec<DeclRef>> = HashMap::new();
+    for (file, decl) in index.decls().filter(|(_, d)| d.kind.is_class_like()) {
+        for written in &decl.supertypes {
+            heirs.entry(written.rsplit('.').next().unwrap_or(written)).or_default().push((file, decl));
+        }
+    }
+    heirs
 }
 
 /// Direct and indirect subtypes of `class`, without `class` itself.
@@ -104,58 +159,23 @@ fn owner<'a>(file: &'a FileSummary, decl: &Decl) -> Option<DeclRef<'a>> {
 /// `decl` with everything it overrides, everything overriding it, and its expect/actual
 /// counterparts.
 pub fn family<'a>(index: &'a Index, decl: DeclRef<'a>, cancel: &Cancel) -> Result<Vec<DeclRef<'a>>, Cancelled> {
-    let mut hierarchy = Hierarchy::new(index);
-    let mut seen: HashSet<Key> = HashSet::from([key(decl)]);
-    let mut work = vec![decl];
-    let mut all = vec![decl];
-    while let Some((file, d)) = work.pop() {
-        cancel.check()?;
-        let mut related: Vec<DeclRef> = Vec::new();
-        if let Some(class) = owner(file, d) {
-            if d.flags.contains(Flags::OVERRIDE) {
-                let ty = Ty { name: class.1.name.clone(), decls: vec![class] };
-                related.extend(supertype_members(index, &ty, &d.name).0);
-            }
-            related.extend(hierarchy.overrides(class, &d.name, cancel)?);
-        }
-        if is_pair((file, d)) {
-            related.extend(by_fqn(index, &d.fqn).into_iter().filter(|&o| is_pair(o)));
-        }
-        for r in related {
-            if seen.insert(key(r)) {
-                work.push(r);
-                all.push(r);
-            }
-        }
-    }
-    Ok(ordered(all))
+    Hierarchy::new(index).family(decl, cancel)
 }
 
 /// What implements or overrides `decl`: subtypes of a class, overrides of a member, the
 /// actuals of an `expect`.
 pub fn implementations<'a>(index: &'a Index, decl: DeclRef<'a>, cancel: &Cancel) -> Result<Vec<DeclRef<'a>>, Cancelled> {
-    let (file, d) = decl;
-    let mut hierarchy = Hierarchy::new(index);
-    let mut found = if d.kind.is_class_like() {
-        hierarchy.subtypes(decl, cancel)?
-    } else if let Some(class) = owner(file, d) {
-        hierarchy.overrides(class, &d.name, cancel)?
-    } else {
-        Vec::new()
-    };
-    if is_expect(file, d) {
-        found.extend(by_fqn(index, &d.fqn).into_iter().filter(|(_, o)| o.flags.contains(Flags::ACTUAL)));
-    }
-    Ok(ordered(found))
+    Hierarchy::new(index).implementations(decl, cancel)
 }
 
 /// Implementations of what the identifier at `byte` declares or refers to.
 pub fn implementation<'a>(index: &'a Index, current: &Current<'a>, sources: &Sources, byte: usize, cancel: &Cancel) -> Result<Vec<Target>, Cancelled> {
     let Some(resolution) = target_at(index, current, sources, byte) else { return Ok(Vec::new()) };
+    let mut hierarchy = Hierarchy::new(index);
     let mut found = Vec::new();
     for item in &resolution.found {
         if let Found::Decl(decl) = item {
-            found.extend(implementations(index, *decl, cancel)?);
+            found.extend(hierarchy.implementations(*decl, cancel)?);
         }
     }
     Ok(ordered(found).into_iter().map(|(file, decl)| Target { path: file.path.clone(), range: decl.name_range }).collect())

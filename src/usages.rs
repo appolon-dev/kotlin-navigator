@@ -11,7 +11,7 @@ use crate::index::Index;
 use crate::model::{FileSummary, Flags, Span};
 use crate::parse::{span_at, span_of};
 use crate::resolve::args::parameter_owner;
-use crate::resolve::family::family;
+use crate::resolve::family::Hierarchy;
 use crate::resolve::rank::tier;
 use crate::resolve::{Certainty, Current, Found, Resolution, target_at};
 use crate::source_set::sees;
@@ -33,12 +33,14 @@ pub(crate) struct Subject<'a> {
     pub family: Vec<Found<'a>>,
 }
 
-/// The subject of the identifier at `byte`; `None` when it refers to nothing.
+/// The subject of the identifier at `byte`; `None` when it refers to nothing. The families
+/// are walked over `hierarchy`, the one of the request.
 pub(crate) fn subject_at<'a>(
     index: &'a Index,
     current: &Current<'a>,
     sources: &Sources,
     byte: usize,
+    hierarchy: &mut Hierarchy<'a>,
     cancel: &Cancel,
 ) -> Result<Option<Subject<'a>>, Cancelled> {
     let Some(resolution) = target_at(index, current, sources, byte) else { return Ok(None) };
@@ -49,8 +51,12 @@ pub(crate) fn subject_at<'a>(
     };
     let mut members: Vec<Found<'a>> = Vec::new();
     for target in &resolution.found {
+        // A family holds the families of its members: a target already in one adds nothing.
+        if members.iter().any(|m| place(m) == place(target)) {
+            continue;
+        }
         let related = match target {
-            Found::Decl(decl) => family(index, *decl, cancel)?.into_iter().map(Found::Decl).collect(),
+            Found::Decl(decl) => hierarchy.family(*decl, cancel)?.into_iter().map(Found::Decl).collect(),
             Found::Local(_) => vec![target.clone()],
         };
         for member in related {
@@ -73,8 +79,9 @@ pub fn references(
     include_declaration: bool,
     cancel: &Cancel,
 ) -> Result<Vec<Usage>, Cancelled> {
-    let Some(subject) = subject_at(index, current, sources, byte, cancel)? else { return Ok(Vec::new()) };
-    let files = scope(index, current, sources, &subject, cancel)?;
+    let mut hierarchy = Hierarchy::new(index);
+    let Some(subject) = subject_at(index, current, sources, byte, &mut hierarchy, cancel)? else { return Ok(Vec::new()) };
+    let files = scope(index, current, sources, &subject, &mut hierarchy, cancel)?;
     let declarations = subject.family.iter().map(|member| {
         let (path, range) = place(member);
         Usage { path: path.to_path_buf(), range, certainty: Certainty::Exact }
@@ -99,13 +106,20 @@ fn search(index: &Index, sources: &Sources, files: &[PathBuf], subject: &Subject
 
 /// The files a usage of the family may be in: those its visibility allows and, for a
 /// parameter, the files that use its function or class, where the `name =` labels are.
-fn scope(index: &Index, current: &Current, sources: &Sources, subject: &Subject, cancel: &Cancel) -> Result<Vec<PathBuf>, Cancelled> {
+fn scope<'a>(
+    index: &'a Index,
+    current: &Current<'a>,
+    sources: &Sources,
+    subject: &Subject,
+    hierarchy: &mut Hierarchy<'a>,
+    cancel: &Cancel,
+) -> Result<Vec<PathBuf>, Cancelled> {
     let (mut files, all) = visible_scope(index, current, subject);
     if all {
         return Ok(files);
     }
     for member in &subject.family {
-        let Some(owner) = owner_of(index, current, sources, member, cancel)? else { continue };
+        let Some(owner) = owner_of(index, current, sources, member, hierarchy, cancel)? else { continue };
         let calls = search(index, sources, &visible_scope(index, current, &owner).0, &owner, cancel)?;
         files.extend(calls.into_iter().map(|u| u.path));
     }
@@ -142,7 +156,14 @@ fn visible_scope(index: &Index, current: &Current, subject: &Subject) -> (Vec<Pa
 /// calls the parameter's labels are in. `None` for anything else, and for a local function
 /// or class, whose calls are in the parameter's own file. The owner is looked up by place,
 /// not resolved by name: in `fun title(title: String)` the name resolves to the parameter.
-fn owner_of<'a>(index: &'a Index, current: &Current<'a>, sources: &Sources, member: &Found, cancel: &Cancel) -> Result<Option<Subject<'a>>, Cancelled> {
+fn owner_of<'a>(
+    index: &'a Index,
+    current: &Current<'a>,
+    sources: &Sources,
+    member: &Found,
+    hierarchy: &mut Hierarchy<'a>,
+    cancel: &Cancel,
+) -> Result<Option<Subject<'a>>, Cancelled> {
     let (path, range) = place(member);
     let here = path == current.summary.path;
     let loaded;
@@ -158,7 +179,7 @@ fn owner_of<'a>(index: &'a Index, current: &Current<'a>, sources: &Sources, memb
     let span = span_of(text, owner);
     let summary = if here { Some(current.summary) } else { index.file(path) };
     let Some(decl) = summary.and_then(|f| f.decls.iter().find(|d| d.name_range == span).map(|d| (f, d))) else { return Ok(None) };
-    let family = family(index, decl, cancel)?.into_iter().map(Found::Decl).collect();
+    let family = hierarchy.family(decl, cancel)?.into_iter().map(Found::Decl).collect();
     Ok(Some(Subject { name: decl.1.name.clone(), targets: vec![Found::Decl(decl)], family }))
 }
 

@@ -38,7 +38,7 @@ pub fn run(root: &Path) -> anyhow::Result<String> {
          definition_samples: {}\ndefinition_zero_pct: {:.1}\ndefinition_one_pct: {:.1}\ndefinition_many_pct: {:.1}\n\
          definition_p50_us: {}\ndefinition_p95_us: {}\n\
          references_samples: {}\nreferences_p50_ms: {}\nreferences_p95_ms: {}\nreferences_max_ms: {}\nreferences_probable_pct: {:.1}\n\
-         highlight_p50_us: {}\nhighlight_p95_us: {}\n",
+         highlight_p50_us: {}\nhighlight_p95_us: {}\nhighlight_max_us: {}\n",
         stats.files,
         stats.skipped,
         stats.decls,
@@ -58,6 +58,7 @@ pub fn run(root: &Path) -> anyhow::Result<String> {
         probable_pct,
         percentile(&highlight_micros, 50),
         percentile(&highlight_micros, 95),
+        highlight_micros.last().copied().unwrap_or(0),
     );
     drop(index);
     Ok(report)

@@ -148,4 +148,5 @@ fn bench_prints_report() {
     assert!(text.contains("\nreferences_max_ms: "));
     assert!(text.contains("\nreferences_probable_pct: "));
     assert!(text.contains("\nhighlight_p95_us: "));
+    assert!(text.contains("\nhighlight_max_us: "));
 }

@@ -7,6 +7,7 @@ use crate::docs::byte_offset;
 use crate::index::Index;
 use crate::model::Span;
 use crate::parse::span_at;
+use crate::resolve::family::Hierarchy;
 use crate::resolve::{Certainty, Current, Found, target_at};
 use crate::sources::Sources;
 use crate::usages::{certainty_of, occurrences, subject_at};
@@ -21,8 +22,9 @@ pub struct Highlight {
 /// Highlights of what the identifier at `byte` declares or refers to, sorted by (line,
 /// start), each place once. Only the current buffer is looked at; probable places are left out.
 pub fn highlight(index: &Index, current: &Current, sources: &Sources, byte: usize) -> Vec<Highlight> {
+    let mut hierarchy = Hierarchy::new(index);
     // A default flag is never raised, so the subject is always found, not cancelled.
-    let Ok(Some(subject)) = subject_at(index, current, sources, byte, &Cancel::default()) else { return Vec::new() };
+    let Ok(Some(subject)) = subject_at(index, current, sources, byte, &mut hierarchy, &Cancel::default()) else { return Vec::new() };
     let mut out: Vec<Highlight> = Vec::new();
     for member in &subject.family {
         let (path, range) = match member {
