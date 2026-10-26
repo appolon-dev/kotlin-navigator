@@ -98,6 +98,14 @@ fn implementation_of_a_function_named_like_its_parameter() {
 }
 
 #[test]
+fn members_of_an_expect_class_are_implemented_by_their_actuals() {
+    let files = [("/ws/core/src/commonMain/kotlin/p/P.kt", "package p\nexpect class P {\n  fun ping()\n}\n"),
+                 ("/ws/core/src/androidMain/kotlin/p/P.android.kt", "package p\nactual class P {\n  actual fun ping() {}\n}\n"),
+                 ("/ws/core/src/iosMain/kotlin/p/P.ios.kt", "package p\nactual class P {\n  actual fun ping() {}\n}\n")];
+    assert_eq!(mem_impls(&files, "/ws/core/src/commonMain/kotlin/p/P.kt", 2, "ping"), ["P.android.kt:2", "P.ios.kt:2"]);
+}
+
+#[test]
 fn a_set_flag_stops_the_walk() {
     let index = fixture();
     let cancel = Cancel::default();

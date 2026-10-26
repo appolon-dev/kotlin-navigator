@@ -78,6 +78,18 @@ fn expect_usages_cover_every_source_set() {
 }
 
 #[test]
+fn members_of_an_expect_class_pair_with_their_actuals() {
+    let files = [("core/src/commonMain/kotlin/p/P.kt", "package p\nexpect class P {\n  fun ping()\n}\n"),
+                 ("core/src/commonMain/kotlin/p/Use.kt", "package p\nfun use(p: P) = p.ping()\n"),
+                 ("core/src/androidMain/kotlin/p/P.android.kt", "package p\nactual class P {\n  actual fun ping() {}\n}\n"),
+                 ("core/src/iosMain/kotlin/p/P.ios.kt", "package p\nactual class P {\n  actual fun ping() {}\n}\n")];
+    assert_eq!(uses_in(&files, "core/src/androidMain/kotlin/p/P.android.kt", 2, "ping", false),
+               v(&["P.kt:2:6 E", "Use.kt:1:18 E", "P.ios.kt:2:13 E"]));
+    assert_eq!(uses_in(&files, "core/src/commonMain/kotlin/p/P.kt", 2, "ping", false),
+               v(&["P.android.kt:2:13 E", "Use.kt:1:18 E", "P.ios.kt:2:13 E"]));
+}
+
+#[test]
 fn java_usages_of_a_kotlin_class() {
     let found = uses(REPO, 7, "Repo", false);
     assert!(found.contains(&"JavaUse.java:2:19 E".to_string()));

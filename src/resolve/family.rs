@@ -86,8 +86,14 @@ pub fn subtypes<'a>(index: &'a Index, class: DeclRef<'a>, cancel: &Cancel) -> Re
     Hierarchy::new(index).subtypes(class, cancel)
 }
 
-fn is_pair(decl: &Decl) -> bool {
-    decl.flags.contains(Flags::EXPECT) || decl.flags.contains(Flags::ACTUAL)
+/// An `expect` declaration, or a member of an `expect` class: those carry no flag of their own.
+fn is_expect(file: &FileSummary, decl: &Decl) -> bool {
+    std::iter::successors(Some(decl), |d| container(file, d)).any(|d| d.flags.contains(Flags::EXPECT))
+}
+
+/// One side of an expect/actual pair. Members of an `actual` class are marked `actual` themselves.
+fn is_pair((file, decl): DeclRef) -> bool {
+    is_expect(file, decl) || decl.flags.contains(Flags::ACTUAL)
 }
 
 /// The class of a member, when it is a member of a class-like declaration.
@@ -112,8 +118,8 @@ pub fn family<'a>(index: &'a Index, decl: DeclRef<'a>, cancel: &Cancel) -> Resul
             }
             related.extend(hierarchy.overrides(class, &d.name, cancel)?);
         }
-        if is_pair(d) {
-            related.extend(by_fqn(index, &d.fqn).into_iter().filter(|(_, o)| is_pair(o)));
+        if is_pair((file, d)) {
+            related.extend(by_fqn(index, &d.fqn).into_iter().filter(|&o| is_pair(o)));
         }
         for r in related {
             if seen.insert(key(r)) {
@@ -137,7 +143,7 @@ pub fn implementations<'a>(index: &'a Index, decl: DeclRef<'a>, cancel: &Cancel)
     } else {
         Vec::new()
     };
-    if d.flags.contains(Flags::EXPECT) {
+    if is_expect(file, d) {
         found.extend(by_fqn(index, &d.fqn).into_iter().filter(|(_, o)| o.flags.contains(Flags::ACTUAL)));
     }
     Ok(ordered(found))
