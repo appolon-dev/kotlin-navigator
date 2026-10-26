@@ -2,6 +2,7 @@ use kotlin_navigator::index::Index;
 use kotlin_navigator::parse::summarize_text;
 use kotlin_navigator::resolve::{definition, Current};
 use kotlin_navigator::scan::build_index;
+use kotlin_navigator::sources::Sources;
 use std::path::{Path, PathBuf};
 
 const CORE: &str = "core/src/commonMain/kotlin/com/fx/core";
@@ -20,7 +21,7 @@ fn hits(index: &Index, base: &Path, path: &Path, line: usize, needle: &str) -> V
     let byte = start + text.split_inclusive('\n').nth(line).unwrap().find(needle).unwrap();
     let (tree, parsed) = summarize_text(path.to_path_buf(), &text).unwrap();
     let summary = index.file(path).cloned().unwrap_or(parsed);
-    definition(index, &Current { text: &text, tree: &tree, summary: &summary }, byte)
+    definition(index, &Current { text: &text, tree: &tree, summary: &summary }, &Sources::default(), byte)
         .iter().map(|t| format!("{}:{}", t.path.strip_prefix(base).unwrap_or(&t.path).display(), t.range.line)).collect()
 }
 fn at(dir: &str, file: &str, line: u32) -> String { format!("{dir}/{file}:{line}") }

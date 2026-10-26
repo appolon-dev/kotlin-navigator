@@ -34,6 +34,12 @@ pub fn visible<'a>(current: &FileSummary, candidates: Vec<DeclRef<'a>>) -> Vec<D
 
 /// Visibility, stage-1 levels, source set, module order and expect/actual, capped at `MAX_CANDIDATES`.
 pub fn rank<'a>(index: &'a Index, current: &FileSummary, candidates: Vec<DeclRef<'a>>) -> Vec<DeclRef<'a>> {
+    rank_with_level(index, current, candidates).0
+}
+
+/// `rank`, and whether one of the four levels (explicit import, same file, same package,
+/// wildcard import) narrowed the list.
+pub fn rank_with_level<'a>(index: &'a Index, current: &FileSummary, candidates: Vec<DeclRef<'a>>) -> (Vec<DeclRef<'a>>, bool) {
     let mut list = visible(current, candidates);
 
     let levels: [&dyn Fn(&FileSummary, &Decl) -> bool; 4] = [
@@ -42,7 +48,9 @@ pub fn rank<'a>(index: &'a Index, current: &FileSummary, candidates: Vec<DeclRef
         &|f, _| f.package == current.package,
         &|_, d| current.imports.iter().any(|i| i.wildcard && i.path == d.parent_fqn()),
     ];
-    if let Some(selected) = levels.iter().map(|keep| keep_only(&list, |f, d| keep(f, d))).find(|s| !s.is_empty()) {
+    let selected = levels.iter().map(|keep| keep_only(&list, |f, d| keep(f, d))).find(|s| !s.is_empty());
+    let level = selected.is_some();
+    if let Some(selected) = selected {
         list = selected;
     }
 
@@ -62,7 +70,7 @@ pub fn rank<'a>(index: &'a Index, current: &FileSummary, candidates: Vec<DeclRef
         list = with_actuals(index, current, list);
     }
     list.truncate(MAX_CANDIDATES);
-    list
+    (list, level)
 }
 
 fn keep_only<'a>(list: &[DeclRef<'a>], keep: impl Fn(&FileSummary, &Decl) -> bool) -> Vec<DeclRef<'a>> {

@@ -24,6 +24,7 @@ use tree_sitter::Tree;
 use crate::docs::{self, Documents, OpenDoc, path_to_uri, uri_to_path};
 use crate::index::Index;
 use crate::model::{Decl, DeclKind, FileSummary, Span};
+use crate::sources::Sources;
 use crate::{parse, resolve, scan};
 
 pub const READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -107,12 +108,6 @@ impl State {
         }
     }
 
-    fn read_from_disk(&self, path: &Path) -> Option<(String, Tree, FileSummary)> {
-        let text = scan::read_source(path)?;
-        let (tree, summary) = self.parse_from_disk(path, &text)?;
-        Some((text, tree, summary))
-    }
-
     fn parse_from_disk(&self, path: &Path, text: &str) -> Option<(Tree, FileSummary)> {
         let (tree, mut summary) = parse::summarize_text(path.to_path_buf(), text)?;
         summary.module = scan::module_of(path, &self.roots);
@@ -160,21 +155,13 @@ fn write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 
 pub fn definition(state: &State, path: &Path, position: Position) -> Vec<Location> {
     state.wait_ready();
-    let docs = read(&state.docs);
-    let from_disk;
-    let (text, tree, summary) = match docs.get(path) {
-        Some(doc) => (&doc.text, &doc.tree, &doc.summary),
-        None => {
-            let Some(read) = state.read_from_disk(path) else { return Vec::new() };
-            from_disk = read;
-            (&from_disk.0, &from_disk.1, &from_disk.2)
-        }
-    };
-    let Some(byte) = docs::byte_offset(text, position.line, position.character) else { return Vec::new() };
+    // The buffers' lock is released before the index is read.
+    let sources = Sources::new(read(&state.docs).snapshot());
+    let Some(doc) = sources.load(path) else { return Vec::new() };
+    let Some(byte) = docs::byte_offset(&doc.text, position.line, position.character) else { return Vec::new() };
     let index = read(&state.index);
-    let summary = if docs.get(path).is_some() { summary } else { index.file(path).unwrap_or(summary) };
-    let current = resolve::Current { text, tree, summary };
-    resolve::definition(&index, &current, byte)
+    let current = resolve::Current::of(&index, &doc);
+    resolve::definition(&index, &current, &sources, byte)
         .into_iter()
         .map(|t| Location { uri: path_to_uri(&t.path), range: range(t.range) })
         .collect()

@@ -8,6 +8,7 @@ use tree_sitter::{Node, Tree};
 use crate::index::Index;
 use crate::model::Lang;
 use crate::resolve::{self, Current};
+use crate::sources::Sources;
 use crate::{parse, scan};
 
 const SAMPLES: usize = 1000;
@@ -62,7 +63,7 @@ fn sample_definitions(index: &Index) -> Vec<(usize, Duration)> {
         let (Some(summary), false) = (index.file(path), names.is_empty()) else { continue };
         let byte = names[rng.below(names.len())];
         let started = Instant::now();
-        let found = resolve::definition(index, &Current { text: &text, tree: &tree, summary }, byte).len();
+        let found = resolve::definition(index, &Current { text: &text, tree: &tree, summary }, &Sources::default(), byte).len();
         samples.push((found, started.elapsed()));
     }
     samples

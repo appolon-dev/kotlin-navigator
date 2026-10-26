@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use lsp_types::Uri;
 use tree_sitter::Tree;
@@ -65,13 +66,15 @@ impl OpenDoc {
     }
 }
 
+/// Open buffers, shared with the requests that read them.
 #[derive(Default)]
 pub struct Documents {
-    docs: HashMap<PathBuf, OpenDoc>,
+    docs: HashMap<PathBuf, Arc<OpenDoc>>,
 }
 
 impl Documents {
     pub fn insert(&mut self, doc: OpenDoc) -> &OpenDoc {
+        let doc = Arc::new(doc);
         match self.docs.entry(doc.summary.path.clone()) {
             Entry::Occupied(mut slot) => {
                 slot.insert(doc);
@@ -81,16 +84,21 @@ impl Documents {
         }
     }
 
-    pub fn close(&mut self, path: &Path) -> Option<OpenDoc> {
+    pub fn close(&mut self, path: &Path) -> Option<Arc<OpenDoc>> {
         self.docs.remove(path)
     }
 
     pub fn get(&self, path: &Path) -> Option<&OpenDoc> {
-        self.docs.get(path)
+        self.docs.get(path).map(Arc::as_ref)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &OpenDoc> {
-        self.docs.values()
+        self.docs.values().map(Arc::as_ref)
+    }
+
+    /// The buffers as they are now, for one request.
+    pub fn snapshot(&self) -> Vec<Arc<OpenDoc>> {
+        self.docs.values().cloned().collect()
     }
 }
 
