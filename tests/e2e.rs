@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 fn version_flag_prints_name_and_version() {
     let out = Command::new(env!("CARGO_BIN_EXE_kotlin-navigator")).arg("--version").output().unwrap();
     assert!(out.status.success());
-    assert_eq!(String::from_utf8(out.stdout).unwrap(), "kotlin-navigator 0.3.0\n");
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), concat!("kotlin-navigator ", env!("CARGO_PKG_VERSION"), "\n"));
 }
 
 fn send(stdin: &mut impl Write, msg: Message) {
