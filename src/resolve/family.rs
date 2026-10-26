@@ -146,7 +146,8 @@ fn is_expect(file: &FileSummary, decl: &Decl) -> bool {
     std::iter::successors(Some(decl), |d| container(file, d)).any(|d| d.flags.contains(Flags::EXPECT))
 }
 
-/// One side of an expect/actual pair. Members of an `actual` class are marked `actual` themselves.
+/// One side of an expect/actual pair. Members of an `actual` class are marked `actual`
+/// themselves; entries of an `actual enum class` are not, and stay unpaired.
 fn is_pair((file, decl): DeclRef) -> bool {
     is_expect(file, decl) || decl.flags.contains(Flags::ACTUAL)
 }

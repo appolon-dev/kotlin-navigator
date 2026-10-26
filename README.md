@@ -61,7 +61,8 @@ This uses Zed's per-server binary override to run the navigator under the ID of 
 - Generic arguments are not parsed in Go to Type Definition: `List<Repo>` leads to `List`. A variable initialized by a function call (`val x = createRepo()`) has no type definition; one initialized by a constructor call (`val x = Repo()`) has.
 - Java getters are not synthetic properties (`getFoo()` is not found as `foo`), and named arguments of `copy(…)` are not resolved. From Java files, members are found by name with ranking only.
 - Java methods are not recognized as overrides of Kotlin members (`@Override` is not read): Go to Implementation and Find Usages leave them out.
-- Extensions on `Any` or on a type parameter (`fun <T> T.log()`) are not found through a receiver of a project type: `a.log()` has no definition and is missing from the extension's usages.
+- Extensions on `Any` or on a type parameter (`fun <T> T.log()`) are not found through a receiver of a project type: `a.log()` has no definition. It is missing from the extension's usages when the type's supertypes are all in the project; with a library supertype it is listed as found by name.
+- Go to Definition on a member of an `expect class` does not offer its `actual`s, and entries of an `actual enum class` are not paired with the `expect` entries.
 - Usages through an import alias (`import a.B as C`, then `C`) are not found.
 - No Gradle variant graph, generated sources or classes from AAR/JAR dependencies. An explicitly imported declaration that is not in the workspace (a library class) yields no result rather than a same-named project one.
 - A parse that runs past its time budget (250 ms plus 2 ms per KB; a half-typed backtick can keep the Kotlin grammar busy for minutes) is abandoned: an open buffer keeps its previous version and an indexed file its previous declarations until the text parses again.

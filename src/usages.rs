@@ -154,8 +154,8 @@ fn visible_scope(index: &Index, current: &Current, subject: &Subject) -> (Vec<Pa
 
 /// The function or class whose parameter `member` is, as a subject: its usages hold the
 /// calls the parameter's labels are in. `None` for anything else, and for a local function
-/// or class, whose calls are in the parameter's own file. The owner is looked up by place,
-/// not resolved by name: in `fun title(title: String)` the name resolves to the parameter.
+/// or class, whose calls are in the parameter's own file. The owner is looked up by place:
+/// its declaration is already known, so nothing needs resolving.
 fn owner_of<'a>(
     index: &'a Index,
     current: &Current<'a>,
