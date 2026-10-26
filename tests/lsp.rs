@@ -1,7 +1,8 @@
 mod support;
+use kotlin_navigator::cancel::Cancel;
 use kotlin_navigator::lsp::{self, State};
-use serde_json::json;
-use std::{fs, path::PathBuf, sync::Arc, time::{Duration, Instant}};
+use serde_json::{json, Value};
+use std::{fs, path::{Path, PathBuf}, sync::Arc, time::{Duration, Instant}};
 use support::{uri, Client};
 
 const DOMAIN_TEXT: &str = "package com.example.domain\nclass StakingRepository {}\n";
@@ -210,5 +211,85 @@ fn a_runaway_parse_on_disk_keeps_the_indexed_declarations() {
     fs::write(&domain, include_str!("fixtures/slow_backtick.kt")).unwrap();
     c.notify("workspace/didChangeWatchedFiles", json!({"changes": [{"uri": uri(&domain), "type": 2}]}));
     assert_eq!(symbols(&mut c, "StakingRepository").len(), 1);
+    c.shutdown();
+}
+
+const REPO_KT: &str = "package d\ninterface Base\nclass Repo : Base {\n  fun stake() {}\n}\n";
+const VM_KT: &str = "package f\nimport d.Repo\nclass Vm(val repo: Repo) {\n  fun go() { repo.stake() }\n}\n";
+
+fn usage_workspace() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("domain/src/Repo.kt");
+    let vm = dir.path().join("feature/src/Vm.kt");
+    for (p, t) in [(&repo, REPO_KT), (&vm, VM_KT)] {
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, t).unwrap();
+    }
+    (dir, repo, vm)
+}
+fn at(path: &Path, line: u32, character: u32) -> Value {
+    json!({"textDocument": {"uri": uri(path)}, "position": {"line": line, "character": character}})
+}
+fn refs_at(path: &Path, line: u32, character: u32) -> Value {
+    let mut params = at(path, line, character);
+    params["context"] = json!({"includeDeclaration": false});
+    params
+}
+fn starts(res: &Value) -> Vec<(String, u64, u64)> {
+    res.as_array().unwrap().iter().map(|l| (l["uri"].as_str().unwrap().to_string(),
+        l["range"]["start"]["line"].as_u64().unwrap(), l["range"]["start"]["character"].as_u64().unwrap())).collect()
+}
+
+#[test]
+fn usages_implementations_types_and_highlights_over_lsp() {
+    let (dir, repo, vm) = usage_workspace();
+    let mut c = Client::start(dir.path());
+    assert_eq!(starts(&c.request("textDocument/references", refs_at(&repo, 3, 7)).unwrap()), vec![(uri(&vm), 3, 18)]);
+    assert_eq!(starts(&c.request("textDocument/implementation", at(&repo, 1, 10)).unwrap()), vec![(uri(&repo), 2, 6)]);
+    assert_eq!(starts(&c.request("textDocument/typeDefinition", at(&vm, 3, 13)).unwrap()), vec![(uri(&repo), 2, 6)]);
+    assert_eq!(c.request("textDocument/documentHighlight", at(&vm, 3, 13)).unwrap(), json!([
+        {"range": {"start": {"line": 2, "character": 13}, "end": {"line": 2, "character": 17}}, "kind": 3},
+        {"range": {"start": {"line": 3, "character": 13}, "end": {"line": 3, "character": 17}}, "kind": 2}]));
+    c.shutdown();
+}
+
+#[test]
+fn usages_come_from_unsaved_buffers() {
+    let (dir, repo, vm) = usage_workspace();
+    let mut c = Client::start(dir.path());
+    open(&c, &vm, &VM_KT.replace("repo.stake() }", "repo.stake(); repo.stake() }"));
+    assert_eq!(starts(&c.request("textDocument/references", refs_at(&repo, 3, 7)).unwrap()), vec![(uri(&vm), 3, 18), (uri(&vm), 3, 32)]);
+    c.shutdown();
+}
+
+#[test]
+fn positions_off_a_name_answer_empty() {
+    let (dir, _, vm) = usage_workspace();
+    let mut c = Client::start(dir.path());
+    for character in [1, 3] { // a space and the `fun` keyword
+        assert_eq!(c.request("textDocument/references", refs_at(&vm, 3, character)), Ok(json!([])));
+        for method in ["textDocument/implementation", "textDocument/typeDefinition", "textDocument/documentHighlight"] {
+            assert_eq!(c.request(method, at(&vm, 3, character)), Ok(json!([])), "{method} at {character}");
+        }
+    }
+    c.shutdown();
+}
+
+#[test]
+fn a_cancelled_request_answers_request_canceled() {
+    let state = State::new(Vec::new(), Duration::from_millis(10));
+    let cancel = Cancel::default();
+    cancel.set();
+    let params = json!({"textDocument": {"uri": "file:///ws/A.kt"}, "position": {"line": 0, "character": 0}, "context": {"includeDeclaration": false}});
+    let request = lsp_server::Request::new(1.into(), "textDocument/references".into(), params);
+    assert_eq!(lsp::answer(&state, request, &cancel).response_result.err().map(|e| e.code), Some(-32800));
+}
+
+#[test]
+fn cancelling_an_unknown_request_is_ignored() {
+    let (dir, domain, feature) = workspace();
+    let mut c = Client::start(dir.path());
+    c.notify("$/cancelRequest", json!({"id": 999}));
+    assert_eq!(repository_definition(&mut c, &feature)[0]["uri"], uri(&domain));
     c.shutdown();
 }

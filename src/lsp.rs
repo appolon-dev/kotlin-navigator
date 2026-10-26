@@ -2,34 +2,41 @@
 //! small thread pool, the initial index is built in the background.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
+use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
     Notification as _,
 };
-use lsp_types::request::{GotoDefinition, Request as _, WorkspaceSymbolRequest};
+use lsp_types::request::{
+    DocumentHighlightRequest, GotoDefinition, GotoImplementation, GotoTypeDefinition, References, Request as _,
+    WorkspaceSymbolRequest,
+};
 use lsp_types::{
-    GotoDefinitionParams, GotoDefinitionResponse, Location, OneOf, Position, Range, ServerCapabilities, SymbolInformation,
-    SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    CancelParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, GotoDefinitionParams,
+    GotoDefinitionResponse, ImplementationProviderCapability, Location, NumberOrString, OneOf, Position, Range,
+    ReferenceParams, ServerCapabilities, SymbolInformation, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TypeDefinitionProviderCapability, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use serde_json::{Value, json};
 use tree_sitter::Tree;
 
+use crate::cancel::{Cancel, Cancelled};
 use crate::docs::{self, Documents, OpenDoc, path_to_uri, uri_to_path};
 use crate::index::Index;
 use crate::model::{Decl, DeclKind, FileSummary, Span};
 use crate::sources::Sources;
-use crate::{parse, resolve, scan};
+use crate::{highlight, parse, resolve, scan, usages};
 
 pub const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_SYMBOLS: usize = 100;
-const REQUEST_THREADS: usize = 4;
+pub const REQUEST_THREADS: usize = 4;
 
 pub struct State {
     pub index: RwLock<Index>,
@@ -38,6 +45,8 @@ pub struct State {
     ready: Mutex<bool>,
     ready_changed: Condvar,
     ready_timeout: Duration,
+    /// Cancel flags of the requests in flight.
+    requests: Mutex<HashMap<RequestId, Cancel>>,
 }
 
 impl State {
@@ -49,6 +58,7 @@ impl State {
             ready: Mutex::new(false),
             ready_changed: Condvar::new(),
             ready_timeout,
+            requests: Mutex::default(),
         })
     }
 
@@ -114,6 +124,28 @@ impl State {
         Some((tree, summary))
     }
 
+    /// A cancel flag for request `id`, kept until `end_request`.
+    fn begin_request(&self, id: &RequestId) -> Cancel {
+        let cancel = Cancel::default();
+        self.requests().insert(id.clone(), cancel.clone());
+        cancel
+    }
+
+    fn end_request(&self, id: &RequestId) {
+        self.requests().remove(id);
+    }
+
+    /// Raises the flag of request `id`; one already answered or never seen is ignored.
+    fn cancel_request(&self, id: &RequestId) {
+        if let Some(cancel) = self.requests().get(id) {
+            cancel.set();
+        }
+    }
+
+    fn requests(&self) -> MutexGuard<'_, HashMap<RequestId, Cancel>> {
+        self.requests.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Adds scanned files to the live index; an open buffer wins over what was read from disk.
     pub fn publish(&self, summaries: Vec<FileSummary>) {
         let docs = read(&self.docs);
@@ -153,18 +185,80 @@ fn write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     lock.write().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The open buffers and what `take` makes of the index, as of one moment: the index is
+/// locked before the buffers' lock is released, so an edit cannot fall in between.
+fn snapshot<'a, T>(state: &'a State, take: impl FnOnce(RwLockReadGuard<'a, Index>) -> T) -> (Sources, T) {
+    let docs = read(&state.docs);
+    let sources = Sources::new(docs.snapshot());
+    (sources, take(read(&state.index)))
+}
+
+/// The buffer of `path` and the byte `position` falls on.
+fn cursor(sources: &Sources, path: &Path, position: Position) -> Option<(Arc<OpenDoc>, usize)> {
+    let doc = sources.load(path)?;
+    let byte = docs::byte_offset(&doc.text, position.line, position.character)?;
+    Some((doc, byte))
+}
+
 pub fn definition(state: &State, path: &Path, position: Position) -> Vec<Location> {
     state.wait_ready();
-    // The buffers' lock is released before the index is read.
-    let sources = Sources::new(read(&state.docs).snapshot());
-    let Some(doc) = sources.load(path) else { return Vec::new() };
-    let Some(byte) = docs::byte_offset(&doc.text, position.line, position.character) else { return Vec::new() };
-    let index = read(&state.index);
+    // The index stays locked for reading while resolving.
+    let (sources, index) = snapshot(state, |index| index);
+    let Some((doc, byte)) = cursor(&sources, path, position) else { return Vec::new() };
     let current = resolve::Current::of(&index, &doc);
-    resolve::definition(&index, &current, &sources, byte)
+    locations(resolve::definition(&index, &current, &sources, byte))
+}
+
+/// Usages of the symbol at `position`. The search runs on a copy of the index, so no lock
+/// is held while it goes through the files.
+pub fn references(
+    state: &State,
+    path: &Path,
+    position: Position,
+    include_declaration: bool,
+    cancel: &Cancel,
+) -> Result<Vec<Location>, Cancelled> {
+    state.wait_ready();
+    let (sources, index) = snapshot(state, |index| Index::clone(&index));
+    let Some((doc, byte)) = cursor(&sources, path, position) else { return Ok(Vec::new()) };
+    let current = resolve::Current::of(&index, &doc);
+    let found = usages::references(&index, &current, &sources, byte, include_declaration, cancel)?;
+    Ok(found.into_iter().map(|u| Location { uri: path_to_uri(&u.path), range: range(u.range) }).collect())
+}
+
+/// Implementations of the symbol at `position`, searched on a copy of the index like `references`.
+pub fn implementation(state: &State, path: &Path, position: Position, cancel: &Cancel) -> Result<Vec<Location>, Cancelled> {
+    state.wait_ready();
+    let (sources, index) = snapshot(state, |index| Index::clone(&index));
+    let Some((doc, byte)) = cursor(&sources, path, position) else { return Ok(Vec::new()) };
+    let current = resolve::Current::of(&index, &doc);
+    Ok(locations(resolve::family::implementation(&index, &current, &sources, byte, cancel)?))
+}
+
+pub fn type_definition(state: &State, path: &Path, position: Position) -> Vec<Location> {
+    state.wait_ready();
+    let (sources, index) = snapshot(state, |index| index);
+    let Some((doc, byte)) = cursor(&sources, path, position) else { return Vec::new() };
+    let current = resolve::Current::of(&index, &doc);
+    locations(resolve::typedef::type_definition(&index, &current, &sources, byte))
+}
+
+pub fn highlight(state: &State, path: &Path, position: Position) -> Vec<DocumentHighlight> {
+    state.wait_ready();
+    let (sources, index) = snapshot(state, |index| index);
+    let Some((doc, byte)) = cursor(&sources, path, position) else { return Vec::new() };
+    let current = resolve::Current::of(&index, &doc);
+    highlight::highlight(&index, &current, &sources, byte)
         .into_iter()
-        .map(|t| Location { uri: path_to_uri(&t.path), range: range(t.range) })
+        .map(|h| DocumentHighlight {
+            range: range(h.range),
+            kind: Some(if h.write { DocumentHighlightKind::WRITE } else { DocumentHighlightKind::READ }),
+        })
         .collect()
+}
+
+fn locations(targets: Vec<resolve::Target>) -> Vec<Location> {
+    targets.into_iter().map(|t| Location { uri: path_to_uri(&t.path), range: range(t.range) }).collect()
 }
 
 pub fn workspace_symbols(state: &State, query: &str) -> Vec<SymbolInformation> {
@@ -229,6 +323,10 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         definition_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
+        references_provider: Some(OneOf::Left(true)),
+        implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
+        type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
+        document_highlight_provider: Some(OneOf::Left(true)),
         ..ServerCapabilities::default()
     };
     connection.initialize_finish(
@@ -262,10 +360,14 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
                 if connection.handle_shutdown(&request)? {
                     return Ok(());
                 }
+                // Registered before queueing, so a `$/cancelRequest` that comes next finds it.
+                let cancel = state.begin_request(&request.id);
                 let state = Arc::clone(&state);
                 let sender = connection.sender.clone();
                 pool.spawn(move || {
-                    let _ = sender.send(handle_request(&state, request).into());
+                    let id = request.id.clone();
+                    let _ = sender.send(answer(&state, request, &cancel).into());
+                    state.end_request(&id);
                 });
             }
             Message::Notification(notification) => handle_notification(&state, notification),
@@ -293,17 +395,29 @@ fn roots_from_init(params: &Value) -> Vec<PathBuf> {
     params["rootPath"].as_str().map(PathBuf::from).into_iter().collect()
 }
 
-fn handle_request(state: &State, request: Request) -> Response {
+/// The response to `request`: `RequestCanceled` when `cancel` is raised before or while it
+/// runs, else what `handle_request` gives.
+pub fn answer(state: &State, request: Request, cancel: &Cancel) -> Response {
+    let id = request.id.clone();
+    if cancel.is_set() {
+        return canceled(id);
+    }
+    let response = handle_request(state, request, cancel);
+    // A request that does not poll the flag runs to the end even when cancelled meanwhile.
+    if cancel.is_set() { canceled(id) } else { response }
+}
+
+fn handle_request(state: &State, request: Request, cancel: &Cancel) -> Response {
     let id = request.id.clone();
     let method = request.method.clone();
-    panic::catch_unwind(AssertUnwindSafe(|| dispatch(state, request))).unwrap_or_else(|panic| {
+    panic::catch_unwind(AssertUnwindSafe(|| dispatch(state, request, cancel))).unwrap_or_else(|panic| {
         let message = panic_message(panic.as_ref());
         log::error!("panic in {method}: {message}");
         Response::new_err(id, ErrorCode::InternalError as i32, message)
     })
 }
 
-fn dispatch(state: &State, request: Request) -> Response {
+fn dispatch(state: &State, request: Request, cancel: &Cancel) -> Response {
     let id = request.id.clone();
     match request.method.as_str() {
         GotoDefinition::METHOD => match serde_json::from_value::<GotoDefinitionParams>(request.params) {
@@ -320,12 +434,61 @@ fn dispatch(state: &State, request: Request) -> Response {
             Ok(params) => Response::new_ok(id, WorkspaceSymbolResponse::Flat(workspace_symbols(state, &params.query))),
             Err(error) => invalid_params(id, error),
         },
+        References::METHOD => match serde_json::from_value::<ReferenceParams>(request.params) {
+            Ok(params) => {
+                let at = params.text_document_position;
+                let include_declaration = params.context.include_declaration;
+                let found = uri_to_path(&at.text_document.uri)
+                    .map_or(Ok(Vec::new()), |path| references(state, &path, at.position, include_declaration, cancel));
+                match found {
+                    Ok(locations) => Response::new_ok(id, Some(locations)),
+                    Err(Cancelled) => canceled(id),
+                }
+            }
+            Err(error) => invalid_params(id, error),
+        },
+        GotoImplementation::METHOD => match serde_json::from_value::<GotoDefinitionParams>(request.params) {
+            Ok(params) => {
+                let at = params.text_document_position_params;
+                let found = uri_to_path(&at.text_document.uri)
+                    .map_or(Ok(Vec::new()), |path| implementation(state, &path, at.position, cancel));
+                match found {
+                    Ok(locations) => Response::new_ok(id, GotoDefinitionResponse::Array(locations)),
+                    Err(Cancelled) => canceled(id),
+                }
+            }
+            Err(error) => invalid_params(id, error),
+        },
+        GotoTypeDefinition::METHOD => match serde_json::from_value::<GotoDefinitionParams>(request.params) {
+            Ok(params) => {
+                let at = params.text_document_position_params;
+                let locations = uri_to_path(&at.text_document.uri)
+                    .map(|path| type_definition(state, &path, at.position))
+                    .unwrap_or_default();
+                Response::new_ok(id, GotoDefinitionResponse::Array(locations))
+            }
+            Err(error) => invalid_params(id, error),
+        },
+        DocumentHighlightRequest::METHOD => match serde_json::from_value::<DocumentHighlightParams>(request.params) {
+            Ok(params) => {
+                let at = params.text_document_position_params;
+                let highlights = uri_to_path(&at.text_document.uri)
+                    .map(|path| highlight(state, &path, at.position))
+                    .unwrap_or_default();
+                Response::new_ok(id, Some(highlights))
+            }
+            Err(error) => invalid_params(id, error),
+        },
         method => Response::new_err(id, ErrorCode::MethodNotFound as i32, format!("unsupported request: {method}")),
     }
 }
 
-fn invalid_params(id: lsp_server::RequestId, error: serde_json::Error) -> Response {
+fn invalid_params(id: RequestId, error: serde_json::Error) -> Response {
     Response::new_err(id, ErrorCode::InvalidParams as i32, error.to_string())
+}
+
+fn canceled(id: RequestId) -> Response {
+    Response::new_err(id, ErrorCode::RequestCanceled as i32, "canceled".to_string())
 }
 
 fn handle_notification(state: &State, notification: Notification) {
@@ -375,6 +538,15 @@ fn apply_notification(state: &State, notification: Notification) {
                 for path in p.changes.iter().filter_map(|c| uri_to_path(&c.uri)) {
                     state.reload_from_disk(&path);
                 }
+            }
+        }
+        lsp_types::notification::Cancel::METHOD => {
+            if let Ok(p) = serde_json::from_value::<CancelParams>(params) {
+                let id = match p.id {
+                    NumberOrString::Number(n) => RequestId::from(n),
+                    NumberOrString::String(s) => RequestId::from(s),
+                };
+                state.cancel_request(&id);
             }
         }
         _ => {}

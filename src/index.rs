@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::model::{Decl, FileSummary};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Index {
     files: HashMap<PathBuf, Arc<FileSummary>>,
     /// Name → files declaring it, each file once per distinct name.
