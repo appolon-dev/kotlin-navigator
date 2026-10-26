@@ -15,6 +15,8 @@ pub enum Role {
     Call,
     /// `::name` or `Type::name`.
     CallableRef,
+    /// The label of a named argument: `name` in `f(name = value)`.
+    Argument,
     Expr,
 }
 
@@ -102,7 +104,7 @@ fn kotlin_context(text: &str, ident: Node) -> Option<(Role, Receiver)> {
             (Role::CallableRef, owner.and_then(|t| type_name(text, t)).map_or(Receiver::None, Receiver::Path))
         }
         "call_expression" if first => (Role::Call, Receiver::None),
-        "value_argument" if ident.next_sibling().is_some_and(|n| n.kind() == "=") => (Role::Expr, Receiver::Unknown),
+        "value_argument" if ident.next_sibling().is_some_and(|n| n.kind() == "=") => (Role::Argument, Receiver::None),
         "class_declaration" | "object_declaration" if is_name => (Role::Type, Receiver::None),
         "function_declaration" if is_name => (Role::Call, Receiver::None),
         "this_expression" | "super_expression" => return None,

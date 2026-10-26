@@ -22,7 +22,7 @@ pub(crate) fn tier(role: &Role, kind: DeclKind) -> Option<usize> {
         Role::Call => return kind.is_class_like().then_some(1),
         Role::CallableRef => matches!(kind, DeclKind::Function | DeclKind::Property) || kind.is_class_like(),
         Role::Expr => matches!(kind, DeclKind::Property | DeclKind::EnumEntry) || kind.is_class_like(),
-        Role::Import(_) => false,
+        Role::Import(_) | Role::Argument => false,
     };
     fits.then_some(0)
 }

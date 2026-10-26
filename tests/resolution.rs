@@ -74,3 +74,20 @@ fn java_is_probable_except_imports() {
     assert_eq!(mem(&files, "/ws/j/Use.java", 2, "Repo"), Some((Probable, v(&["Repo.kt:1"]))));
     assert_eq!(mem(&files, "/ws/j/Use.java", 1, "Repo"), Some((Exact, v(&["Repo.kt:1"]))));
 }
+
+const USAGES: &str = "app/src/commonMain/kotlin/com/fx/app/Usages.kt";
+
+#[test]
+fn label_goes_to_the_parameter() {
+    assert_eq!(how(USAGES, 11, "limit"), Some((Exact, v(&["Repo.kt:9 local"]))));
+    assert_eq!(how(USAGES, 10, "size"), Some((Exact, v(&["Repo.kt:7"])))); // `val` parameter: the property
+}
+
+#[test]
+fn labels_of_local_functions_constructors_and_missing_parameters() {
+    let files = [("/ws/a/U.kt", "package a\nclass P(plain: Int)\nfun f(a: Int) {}\nfun g() {\n  fun inner(x: Int) {}\n  inner(x = 1); P(plain = 2); f(b = 3); f(a = 4)\n}\n")];
+    assert_eq!(mem(&files, "/ws/a/U.kt", 5, "x ="), Some((Exact, v(&["U.kt:4 local"]))));
+    assert_eq!(mem(&files, "/ws/a/U.kt", 5, "plain ="), Some((Exact, v(&["U.kt:1 local"]))));
+    assert_eq!(mem(&files, "/ws/a/U.kt", 5, "a ="), Some((Exact, v(&["U.kt:2 local"]))));
+    assert_eq!(mem(&files, "/ws/a/U.kt", 5, "b ="), Some((Exact, vec![])));
+}

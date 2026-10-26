@@ -147,7 +147,7 @@ fn value(range: Range<usize>, type_name: Option<String>) -> Local {
     Local { range, kind: LocalKind::Value, type_name, from_call: false }
 }
 
-fn is_property(param: Node) -> bool {
+pub(super) fn is_property(param: Node) -> bool {
     let mut cursor = param.walk();
     param.children(&mut cursor).any(|c| !c.is_named() && matches!(c.kind(), "val" | "var"))
 }

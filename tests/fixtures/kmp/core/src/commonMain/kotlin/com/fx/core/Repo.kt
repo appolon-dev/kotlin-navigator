@@ -7,7 +7,7 @@ interface Base {
 
 open class Repo(val size: Int) : Base {
     override fun ping() {}
-    fun load(): Int = size
+    fun load(limit: Int = 0): Int = size + limit
     private fun secret() {}
     internal fun shared() {}
     companion object {

@@ -1,5 +1,6 @@
 //! What is under the cursor, which declarations it may refer to, and how sure that is.
 
+pub mod args;
 pub mod context;
 pub mod members;
 pub mod rank;
@@ -12,11 +13,11 @@ use tree_sitter::Tree;
 use self::context::{Receiver, Reference, Role, reference_at};
 use self::members::{Ty, members_named, resolve_type, supertype_members};
 use self::rank::{DeclRef, prefer, rank, rank_with_level, tier, visible};
-use self::scope::{Implicit, Local, LocalKind, enclosing_declarations, find_local, implicit_receivers};
+use self::scope::{Implicit, is_property, Local, LocalKind, enclosing_declarations, find_local, implicit_receivers};
 use crate::docs::OpenDoc;
 use crate::index::Index;
 use crate::model::{DeclKind, FileSummary, Flags, Import, Lang, Span};
-use crate::parse::span_at;
+use crate::parse::{span_at, span_of, type_child};
 use crate::sources::Sources;
 use Certainty::{Exact, Probable};
 
@@ -91,7 +92,7 @@ pub fn definition(index: &Index, current: &Current, sources: &Sources, byte: usi
 }
 
 /// What the identifier at `byte` refers to; `None` only when there is no name there.
-pub fn resolve<'a>(index: &'a Index, current: &Current<'a>, _sources: &Sources, byte: usize) -> Option<Resolution<'a>> {
+pub fn resolve<'a>(index: &'a Index, current: &Current<'a>, sources: &Sources, byte: usize) -> Option<Resolution<'a>> {
     let reference = reference_at(current.tree, current.text, byte)?;
     let resolver = Resolver {
         index,
@@ -105,6 +106,8 @@ pub fn resolve<'a>(index: &'a Index, current: &Current<'a>, _sources: &Sources, 
     };
     let (found, certainty) = if let Role::Import(fqn) = &reference.role {
         (decls(by_fqn(index, fqn)), Exact)
+    } else if matches!(reference.role, Role::Argument) {
+        return Some(label(index, current, sources, reference));
     } else if current.summary.lang == Lang::Java {
         resolver.java()
     } else {
@@ -120,6 +123,44 @@ pub fn resolve<'a>(index: &'a Index, current: &Current<'a>, _sources: &Sources, 
         }
     };
     Some(Resolution { reference, found, certainty })
+}
+
+/// A named-argument label: the parameter of the callee, found in the file that declares it.
+/// A `val`/`var` parameter of a class is its property; any other is a local declaration.
+fn label<'a>(index: &'a Index, current: &Current<'a>, sources: &Sources, reference: Reference) -> Resolution<'a> {
+    let start = reference.range.start;
+    let callee = current.tree.root_node().named_descendant_for_byte_range(start, start).and_then(args::label_callee);
+    let Some(callee) = callee else { return Resolution { reference, found: Vec::new(), certainty: Probable } };
+    let Some(called) = resolve(index, current, sources, callee.start_byte()) else {
+        return Resolution { reference, found: Vec::new(), certainty: Probable };
+    };
+    let mut found: Vec<Found<'a>> = Vec::new();
+    for target in called.found.iter().map(Found::target) {
+        let doc;
+        let (text, tree) = if target.path == current.summary.path {
+            (current.text, current.tree)
+        } else {
+            let Some(loaded) = sources.load(&target.path) else { continue };
+            doc = loaded;
+            (doc.text.as_str(), &doc.tree)
+        };
+        let Some(param) = args::parameter(tree, text, target.range, &reference.name) else { continue };
+        let range = span_of(text, param);
+        let property = param.parent().filter(|p| p.kind() == "class_parameter" && is_property(*p));
+        let summary = if target.path == current.summary.path { Some(current.summary) } else { index.file(&target.path) };
+        let decl = property.and(summary).and_then(|f| f.decls.iter().find(|d| d.name_range == range).map(|d| (f, d)));
+        let item = match decl {
+            Some(decl) => Found::Decl(decl),
+            None => {
+                let type_name = param.parent().and_then(|p| type_child(text, p));
+                Found::Local(LocalDecl { path: target.path.clone(), range, type_name })
+            }
+        };
+        if !found.iter().any(|f| f.target() == item.target()) {
+            found.push(item);
+        }
+    }
+    Resolution { reference, found, certainty: called.certainty }
 }
 
 /// A variable a receiver path names, and where its type is written.

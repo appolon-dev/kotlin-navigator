@@ -28,7 +28,7 @@ fn kotlin_roles_and_receivers() {
     assert_eq!(kt(4, "bar\n"), Some(("bar".into(), CallableRef, p("Foo"))));
     assert_eq!(kt(5, "Inner"), Some(("Inner".into(), Type, p("Outer"))));
     assert_eq!(kt(5, "Outer"), Some(("Outer".into(), Type, Receiver::None)));
-    assert_eq!(kt(5, "count"), Some(("count".into(), Expr, Unknown))); // named argument: looked up by name
+    assert_eq!(kt(5, "count"), Some(("count".into(), Argument, Receiver::None))); // named argument label
     assert_eq!(kt(6, "v "), Some(("v".into(), Expr, Receiver::None)));  // "$v": string_content after "$"
     assert_eq!(kt(6, "size"), Some(("size".into(), Expr, p("repo"))));
     assert_eq!(kt(6, "it"), Some(("it".into(), Expr, Receiver::None)));
