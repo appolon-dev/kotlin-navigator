@@ -52,6 +52,7 @@ This uses Zed's per-server binary override to run the navigator under the ID of 
 - Named arguments and lambdas with receivers (`apply {}`, `with(x) {}`) are not resolved; they fall back to the search by name.
 - No synthetic properties for Java getters (`getFoo()` as `foo`). From Java files, members are found by name with ranking only.
 - No Gradle variant graph, generated sources or classes from AAR/JAR dependencies. An explicitly imported declaration that is not in the workspace (a library class) yields no result rather than a same-named project one.
+- A parse that runs past its time budget (250 ms plus 2 ms per KB; a half-typed backtick can keep the Kotlin grammar busy for minutes) is abandoned: an open buffer keeps its previous version and an indexed file its previous declarations until the text parses again.
 - Find Usages, `$/cancelRequest`, an on-disk cache and file-watch registration come in later stages.
 
 ## Diagnostics
@@ -72,10 +73,10 @@ Measured on a real KMP project (2026-10-26, Apple Silicon, 10 cores):
 |---|---|---|---|
 | files indexed | 42 150 (walked into 18 git worktrees) | 4 924 | 4 924 |
 | declarations | | | 47 530 |
-| cold index | 34.8 s | 0.75–1.3 s | 0.83–1.24 s |
-| peak memory | 147 MB | 32–34 MB | 55–61 MB (incl. sampling) |
-| unambiguous definition (one target) | | | 57.5 % (none: 35.7 %, several: 6.8 %) |
-| definition time, p50 / p95 | | | 16 µs / 60–62 µs |
+| cold index | 34.8 s | 0.75–1.3 s | 0.88–1.41 s |
+| peak memory | 147 MB | 32–34 MB | 54–58 MB (incl. sampling) |
+| unambiguous definition (one target) | | | 57.6 % (none: 35.7 %, several: 6.7 %) |
+| definition time, p50 / p95 | | | 16–18 µs / 66–70 µs |
 
 Most lookups without a target are library and generated names (`String`, `Serializable`, `Modifier`, DI DSL functions such as `single`, generated database and resource classes) and `null`/`true`/`false`, which the grammar reports as identifiers.
 
