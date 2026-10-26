@@ -1,0 +1,16 @@
+id = "kotlin-navigator"
+name = "Kotlin Navigator"
+version = "0.1.0"
+schema_version = 1
+authors = ["Vitalii Piskunov"]
+description = "Fast go to definition, find usages and implementations for Kotlin and Java (Android, KMP)."
+repository = "https://github.com/appolon-dev/kotlin-navigator"
+
+[language_servers.kotlin-navigator]
+name = "Kotlin Navigator"
+languages = ["Kotlin", "Java"]
+
+[[capabilities]]
+kind = "download_file"
+host = "github.com"
+path = ["appolon-dev", "kotlin-navigator", "**"]
