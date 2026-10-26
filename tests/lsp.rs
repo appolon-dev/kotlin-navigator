@@ -23,6 +23,12 @@ fn symbols(c: &mut Client, q: &str) -> Vec<serde_json::Value> {
 fn open(c: &Client, path: &std::path::Path, text: &str) {
     c.notify("textDocument/didOpen", json!({"textDocument": {"uri": uri(path), "languageId": "kotlin", "version": 1, "text": text}}));
 }
+fn change(c: &Client, path: &std::path::Path, text: &str) {
+    c.notify("textDocument/didChange", json!({"textDocument": {"uri": uri(path), "version": 2}, "contentChanges": [{"text": text}]}));
+}
+fn repository_definition(c: &mut Client, feature: &std::path::Path) -> serde_json::Value {
+    c.request("textDocument/definition", json!({"textDocument": {"uri": uri(feature)}, "position": {"line": 2, "character": 36}})).unwrap()
+}
 
 #[test]
 fn definition_across_modules() {
@@ -172,5 +178,26 @@ fn member_definition_over_lsp() {
     let res = c.request("textDocument/definition", json!({"textDocument": {"uri": uri(&feature)}, "position": {"line": 3, "character": 18}})).unwrap();
     assert_eq!(res[0]["uri"], uri(&domain));
     assert_eq!(res[0]["range"]["start"], json!({"line": 2, "character": 6}));
+    c.shutdown();
+}
+
+#[test]
+fn typing_at_the_end_of_a_file_keeps_the_server_responsive() {
+    let (dir, domain, feature) = workspace();
+    let mut c = Client::start(dir.path());
+    open(&c, &feature, FEATURE_TEXT);
+    // `@` typed on a new last line after a property.
+    change(&c, &feature, &format!("{FEATURE_TEXT}val other: StakingRepository? = null\n@"));
+    assert_eq!(repository_definition(&mut c, &feature)[0]["uri"], uri(&domain));
+    c.shutdown();
+}
+
+#[test]
+fn a_runaway_parse_keeps_the_previous_buffer() {
+    let (dir, domain, feature) = workspace();
+    let mut c = Client::start(dir.path());
+    open(&c, &feature, FEATURE_TEXT);
+    change(&c, &feature, include_str!("fixtures/slow_backtick.kt"));
+    assert_eq!(repository_definition(&mut c, &feature)[0]["uri"], uri(&domain));
     c.shutdown();
 }

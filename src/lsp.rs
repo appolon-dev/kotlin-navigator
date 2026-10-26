@@ -21,7 +21,7 @@ use lsp_types::{
 use serde_json::{Value, json};
 use tree_sitter::Tree;
 
-use crate::docs::{self, Documents, path_to_uri, uri_to_path};
+use crate::docs::{self, Documents, OpenDoc, path_to_uri, uri_to_path};
 use crate::index::Index;
 use crate::model::{Decl, DeclKind, FileSummary, Span};
 use crate::{parse, resolve, scan};
@@ -75,8 +75,11 @@ impl State {
 
     pub fn open_or_change(&self, path: PathBuf, text: String) {
         let module = scan::module_of(&path, &self.roots);
+        // Parsed outside the lock, so requests meanwhile read the previous buffer, which
+        // also stays when parsing gives up.
+        let Some(doc) = OpenDoc::parse(path.clone(), text, module) else { return };
         let mut docs = write(&self.docs);
-        let Some(doc) = docs.set(path.clone(), text, module) else { return };
+        let doc = docs.insert(doc);
         let mut index = write(&self.index);
         if self.indexable(&index, &path) {
             index.upsert(doc.summary.clone());

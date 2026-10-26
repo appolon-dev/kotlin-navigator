@@ -1,6 +1,8 @@
 use kotlin_navigator::model::{DeclKind::*, DeclKind, FileSummary, Flags, Import, Span};
-use kotlin_navigator::parse::summarize_text;
+use kotlin_navigator::model::Lang;
+use kotlin_navigator::parse::{parse_within, source_text, summarize_text};
 use std::path::PathBuf;
+use std::time::Duration;
 
 fn summary(text: &str) -> FileSummary {
     summarize_text(PathBuf::from("/ws/A.kt"), text).unwrap().1
@@ -140,4 +142,39 @@ fn error_regions_recover_functions_and_properties() {
     assert_eq!(fqns(text), v(&[("p.E", Object), ("p.E.f", Function), ("p.E.after", Property), ("p.E.ext", Function)]));
     // Enum members after `;` land in an ERROR inside enum_class_body.
     assert_eq!(fqns("package p\nenum class C { Q; fun g() {} }\n"), v(&[("p.C", Enum), ("p.C.Q", EnumEntry), ("p.C.g", Function)]));
+}
+
+/// Runs `f` on its own thread; panics when it has not finished within `secs` seconds.
+fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(Duration::from_secs(secs)).expect("finished in time")
+}
+
+#[test]
+fn annotation_at_the_end_of_input_does_not_hang() {
+    let s = within(10, || summary("package a\nval r: Repo? = null\n@"));
+    assert_eq!(s.decls[0].name, "r");
+}
+
+#[test]
+fn runaway_parse_gives_up() {
+    // A lone backtick sends the grammar's error recovery into minutes of work.
+    let text = include_str!("fixtures/slow_backtick.kt");
+    assert!(within(10, move || summarize_text(PathBuf::from("/ws/A.kt"), text).is_none()));
+}
+
+#[test]
+fn parser_recovers_after_giving_up() {
+    let big = "fun f() { g(1, 2) }\n".repeat(5000);
+    assert!(parse_within(Lang::Kotlin, &big, Duration::ZERO).is_none());
+    assert_eq!(summary("class B\n").decls[0].name, "B");
+}
+
+#[test]
+fn source_text_ends_with_a_newline() {
+    assert_eq!(source_text("class A".to_string()), "class A\n");
+    assert_eq!(source_text("class A\n".to_string()), "class A\n");
 }

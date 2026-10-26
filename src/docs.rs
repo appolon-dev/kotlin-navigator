@@ -1,6 +1,7 @@
 //! Positions (LSP UTF-16 columns <-> byte offsets) and file URIs.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 
 use lsp_types::Uri;
@@ -53,19 +54,31 @@ pub struct OpenDoc {
     pub summary: FileSummary,
 }
 
+impl OpenDoc {
+    /// Parses the buffer of a file in Gradle module `module`; `None` for languages we do
+    /// not parse and when parsing gives up.
+    pub fn parse(path: PathBuf, text: String, module: Option<PathBuf>) -> Option<OpenDoc> {
+        let text = parse::source_text(text);
+        let (tree, mut summary) = parse::summarize_text(path, &text)?;
+        summary.module = module;
+        Some(OpenDoc { text, tree, summary })
+    }
+}
+
 #[derive(Default)]
 pub struct Documents {
     docs: HashMap<PathBuf, OpenDoc>,
 }
 
 impl Documents {
-    /// Parses and stores the buffer of a file in Gradle module `module`; `None` for
-    /// languages we do not parse.
-    pub fn set(&mut self, path: PathBuf, text: String, module: Option<PathBuf>) -> Option<&OpenDoc> {
-        let (tree, mut summary) = parse::summarize_text(path.clone(), &text)?;
-        summary.module = module;
-        self.docs.insert(path.clone(), OpenDoc { text, tree, summary });
-        self.docs.get(&path)
+    pub fn insert(&mut self, doc: OpenDoc) -> &OpenDoc {
+        match self.docs.entry(doc.summary.path.clone()) {
+            Entry::Occupied(mut slot) => {
+                slot.insert(doc);
+                slot.into_mut()
+            }
+            Entry::Vacant(slot) => slot.insert(doc),
+        }
     }
 
     pub fn close(&mut self, path: &Path) -> Option<OpenDoc> {

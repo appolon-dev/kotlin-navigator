@@ -11,7 +11,7 @@ use rayon::prelude::*;
 
 use crate::index::Index;
 use crate::model::FileSummary;
-use crate::parse::summarize_text;
+use crate::parse::{source_text, summarize_text};
 
 /// Directories skipped even when no ignore file mentions them (same list as the Python version).
 pub const SKIP_DIRS: [&str; 6] = ["build", "out", "target", "bin", "node_modules", "generated"];
@@ -133,8 +133,9 @@ pub fn output_within(command: &mut Command, timeout: Duration) -> Option<Vec<u8>
     status.success().then_some(out)
 }
 
+/// A source file as the server keeps it (see `parse::source_text`).
 pub fn read_source(path: &Path) -> Option<String> {
-    String::from_utf8(std::fs::read(path).ok()?).ok()
+    String::from_utf8(std::fs::read(path).ok()?).ok().map(source_text)
 }
 
 pub fn build_index(roots: &[PathBuf]) -> (Index, ScanStats) {

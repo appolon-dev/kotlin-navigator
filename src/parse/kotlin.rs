@@ -36,7 +36,7 @@ pub(crate) fn summarize(path: PathBuf, text: &str, tree: &Tree) -> FileSummary {
     }
     // Annotations never declare anything; blanking them (offsets unchanged) lets the
     // grammar see the declarations. Spans are still computed against the original text.
-    let reparsed = needs_reparse(root).then(|| parse(Lang::Kotlin, &blank_annotations(text, root)));
+    let reparsed = needs_reparse(root).then(|| parse(Lang::Kotlin, &blank_annotations(text, root))).flatten();
     let root = reparsed.as_ref().map_or(root, Tree::root_node);
     let mut sink = DeclSink { text, package: &package, decls: Vec::new() };
     if root.kind() == "ERROR" {

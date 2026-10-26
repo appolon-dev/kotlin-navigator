@@ -5,11 +5,13 @@ mod kotlin;
 
 pub(crate) use kotlin::{declared, receiver_before, type_child, variables};
 
+use std::borrow::Cow;
 use std::cell::RefCell;
-use std::ops::Range;
+use std::ops::{ControlFlow, Range};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use tree_sitter::{Language, Node, Parser, Tree};
+use tree_sitter::{Language, Node, ParseOptions, ParseState, Parser, Point, Tree};
 
 use crate::docs::utf16_len;
 use crate::model::{Decl, DeclKind, FileSummary, Flags, Lang, Span};
@@ -33,13 +35,50 @@ pub fn lang_of(path: &Path) -> Option<Lang> {
     }
 }
 
-pub fn parse(lang: Lang, text: &str) -> Tree {
+/// How long parsing `len` bytes may take. tree-sitter's error recovery can run for minutes
+/// on a half-typed line (a lone backtick); the slowest of the 5 222 files of the test
+/// corpus took 131 ms for 74 KB.
+fn budget(len: usize) -> Duration {
+    Duration::from_millis(250 + 2 * (len / 1024) as u64)
+}
+
+/// The text the server keeps for a file: it ends with a newline. The Kotlin grammar's
+/// scanner loops forever on an `@` right before the end of input.
+pub fn source_text(mut text: String) -> String {
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text
+}
+
+/// The tree of `text`, or `None` when parsing ran out of time.
+pub fn parse(lang: Lang, text: &str) -> Option<Tree> {
+    parse_within(lang, text, budget(text.len()))
+}
+
+/// Parses `text`, read as if it ended with a newline (see `source_text`); `None` once `budget` has passed.
+pub fn parse_within(lang: Lang, text: &str, budget: Duration) -> Option<Tree> {
     let parser = match lang {
         Lang::Kotlin => &KOTLIN,
         Lang::Java => &JAVA,
     };
-    // `parse` only returns None without a language, a timeout or a cancellation flag; none are set.
-    parser.with_borrow_mut(|p| p.parse(text, None)).expect("parser has a language")
+    let bytes = text.as_bytes();
+    let newline: &[u8] = if text.ends_with('\n') { b"" } else { b"\n" };
+    let mut input = |offset: usize, _: Point| match offset.checked_sub(bytes.len()) {
+        None => &bytes[offset..],
+        Some(past) => newline.get(past..).unwrap_or_default(),
+    };
+    let deadline = Instant::now() + budget;
+    let mut on_progress =
+        |_: &ParseState| if Instant::now() < deadline { ControlFlow::Continue(()) } else { ControlFlow::Break(()) };
+    parser.with_borrow_mut(|p| {
+        let tree = p.parse_with_options(&mut input, None, Some(ParseOptions::new().progress_callback(&mut on_progress)));
+        if tree.is_none() {
+            // Otherwise the next call would resume this parse.
+            p.reset();
+        }
+        tree
+    })
 }
 
 pub fn summarize(path: PathBuf, lang: Lang, text: &str, tree: &Tree) -> FileSummary {
@@ -49,10 +88,16 @@ pub fn summarize(path: PathBuf, lang: Lang, text: &str, tree: &Tree) -> FileSumm
     }
 }
 
+/// The tree and summary of a file; `None` for languages we do not parse and when parsing
+/// gives up. Callers keep `source_text(text)`, which the tree's ranges refer to.
 pub fn summarize_text(path: PathBuf, text: &str) -> Option<(Tree, FileSummary)> {
     let lang = lang_of(&path)?;
-    let tree = parse(lang, text);
-    let summary = summarize(path, lang, text, &tree);
+    let text = if text.ends_with('\n') { Cow::Borrowed(text) } else { Cow::Owned(format!("{text}\n")) };
+    let Some(tree) = parse(lang, &text) else {
+        log::warn!("gave up parsing {}", path.display());
+        return None;
+    };
+    let summary = summarize(path, lang, &text, &tree);
     Some((tree, summary))
 }
 
