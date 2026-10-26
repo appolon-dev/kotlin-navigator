@@ -85,3 +85,9 @@ fn whole_file_parsed_as_error_keeps_declarations() {
     assert_eq!(s.package, "p");
     assert_eq!(fqns(text), v(&[("p.E", Object)]));
 }
+
+#[test]
+fn summary_records_source_set() {
+    let (_, s) = summarize_text(PathBuf::from("/ws/m/src/iosMain/kotlin/A.kt"), "class A\n").unwrap();
+    assert_eq!((s.source_set.as_deref(), s.module.clone()), (Some("iosMain"), None));
+}

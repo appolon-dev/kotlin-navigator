@@ -1,6 +1,6 @@
 //! Workspace walk (gitignore-aware) and parallel initial indexing.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -78,6 +78,16 @@ pub fn in_workspace(roots: &[PathBuf], path: &Path) -> bool {
     })
 }
 
+/// The Gradle module of a file: the nearest directory up from it, up to and including
+/// its workspace root, that has `build.gradle.kts` or `build.gradle`.
+pub fn module_of(path: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
+    let root = roots.iter().find(|root| path.starts_with(root))?;
+    path.ancestors().skip(1).take_while(|dir| dir.starts_with(root)).find_map(|dir| {
+        let has_script = ["build.gradle.kts", "build.gradle"].iter().any(|f| dir.join(f).is_file());
+        has_script.then(|| dir.to_path_buf())
+    })
+}
+
 /// `.kt`/`.java` files tracked by git under `root`; empty when git or the repository is unavailable.
 fn git_tracked_sources(root: &Path) -> Vec<PathBuf> {
     let output = Command::new("git")
@@ -114,8 +124,12 @@ pub fn build_index(roots: &[PathBuf]) -> (Index, ScanStats) {
     let skipped = summaries.iter().filter(|s| s.is_none()).count();
     let mut index = Index::default();
     let mut error_files = 0;
-    for summary in summaries.into_iter().flatten() {
+    // Files of one directory share a module: look it up once per directory.
+    let mut modules: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
+    for mut summary in summaries.into_iter().flatten() {
         error_files += usize::from(summary.has_errors);
+        let dir = summary.path.parent().map(Path::to_path_buf).unwrap_or_default();
+        summary.module = modules.entry(dir).or_insert_with(|| module_of(&summary.path, roots)).clone();
         index.upsert(summary);
     }
     let stats = ScanStats {

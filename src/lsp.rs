@@ -181,6 +181,8 @@ fn symbol(file: &FileSummary, decl: &Decl) -> SymbolInformation {
         DeclKind::Enum => SymbolKind::ENUM,
         DeclKind::EnumEntry => SymbolKind::ENUM_MEMBER,
         DeclKind::Class | DeclKind::Object | DeclKind::TypeAlias => SymbolKind::CLASS,
+        DeclKind::Function => SymbolKind::FUNCTION,
+        DeclKind::Property => SymbolKind::PROPERTY,
     };
     let container = decl.parent_fqn();
     SymbolInformation {

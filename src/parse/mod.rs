@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use tree_sitter::{Language, Node, Parser, Tree};
 
 use crate::docs::utf16_len;
-use crate::model::{Decl, DeclKind, FileSummary, Lang, Span};
+use crate::model::{Decl, DeclKind, FileSummary, Flags, Lang, Span};
 
 thread_local! {
     static KOTLIN: RefCell<Parser> = RefCell::new(new_parser(&tree_sitter_kotlin_ng::LANGUAGE.into()));
@@ -116,7 +116,17 @@ impl DeclSink<'_> {
     fn add(&mut self, name: String, name_range: Span, kind: DeclKind, container: Option<u32>) -> u32 {
         let prefix = container.map_or(self.package, |c| self.decls[c as usize].fqn.as_str());
         let fqn = qualify(prefix, &name);
-        self.decls.push(Decl { name, fqn, kind, container, name_range });
+        self.decls.push(Decl {
+            name,
+            fqn,
+            kind,
+            container,
+            name_range,
+            receiver: None,
+            type_hint: None,
+            supertypes: Vec::new(),
+            flags: Flags::default(),
+        });
         (self.decls.len() - 1) as u32
     }
 }

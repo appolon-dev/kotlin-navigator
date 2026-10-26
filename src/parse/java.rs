@@ -7,6 +7,7 @@ use tree_sitter::{Node, Tree};
 
 use super::{DeclSink, dotted_text};
 use crate::model::{DeclKind, FileSummary, Import, Lang};
+use crate::source_set::source_set_of;
 
 pub(crate) fn summarize(path: PathBuf, text: &str, tree: &Tree) -> FileSummary {
     let root = tree.root_node();
@@ -32,7 +33,17 @@ pub(crate) fn summarize(path: PathBuf, text: &str, tree: &Tree) -> FileSummary {
     }
     let mut sink = DeclSink { text, package: &package, decls: Vec::new() };
     visit(&mut sink, root, None);
-    FileSummary { path, lang: Lang::Java, package: package.clone(), imports, decls: sink.decls, has_errors: root.has_error() }
+    let source_set = source_set_of(&path);
+    FileSummary {
+        path,
+        lang: Lang::Java,
+        package: package.clone(),
+        imports,
+        decls: sink.decls,
+        has_errors: root.has_error(),
+        module: None,
+        source_set,
+    }
 }
 
 fn path_child(node: Node) -> Option<Node> {

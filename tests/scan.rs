@@ -53,3 +53,20 @@ fn git_tracked_sources_are_kept_even_when_ignored() {
         .map(|p| p.strip_prefix(r).unwrap().to_string_lossy().into_owned()).collect();
     assert_eq!(found, vec!["nav/keys/ScreenKey.kt"]);
 }
+
+#[test]
+fn module_is_the_nearest_dir_with_a_build_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = dir.path();
+    write(r, "build.gradle.kts", b"");
+    write(r, "core/build.gradle", b"");
+    write(r, "core/src/commonMain/kotlin/a/A.kt", b"package a\nclass A\n");
+    write(r, "loose/B.kt", b"class B\n");
+    let roots = [r.to_path_buf()];
+    assert_eq!(kotlin_navigator::scan::module_of(&r.join("core/src/commonMain/kotlin/a/A.kt"), &roots), Some(r.join("core")));
+    assert_eq!(kotlin_navigator::scan::module_of(&r.join("loose/B.kt"), &roots), Some(r.to_path_buf()));
+    assert_eq!(kotlin_navigator::scan::module_of(Path::new("/elsewhere/C.kt"), &roots), None);
+    let (idx, _) = build_index(&roots);
+    let a = idx.file(&r.join("core/src/commonMain/kotlin/a/A.kt")).unwrap();
+    assert_eq!((a.module.clone(), a.source_set.as_deref()), (Some(r.join("core")), Some("commonMain")));
+}

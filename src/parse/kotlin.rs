@@ -16,6 +16,7 @@ use tree_sitter::{Node, Tree};
 use self::recover::recover;
 use super::{DeclSink, dotted_text, ident_text, named_child_of_kind, parse};
 use crate::model::{DeclKind, FileSummary, Import, Lang};
+use crate::source_set::source_set_of;
 
 pub(crate) fn summarize(path: PathBuf, text: &str, tree: &Tree) -> FileSummary {
     let root = tree.root_node();
@@ -43,6 +44,7 @@ pub(crate) fn summarize(path: PathBuf, text: &str, tree: &Tree) -> FileSummary {
     } else {
         visit(&mut sink, root, None);
     }
+    let source_set = source_set_of(&path);
     FileSummary {
         path,
         lang: Lang::Kotlin,
@@ -50,6 +52,8 @@ pub(crate) fn summarize(path: PathBuf, text: &str, tree: &Tree) -> FileSummary {
         imports,
         decls: sink.decls,
         has_errors: root.has_error(),
+        module: None,
+        source_set,
     }
 }
 

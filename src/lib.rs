@@ -6,3 +6,4 @@ pub mod model;
 pub mod parse;
 pub mod resolve;
 pub mod scan;
+pub mod source_set;
