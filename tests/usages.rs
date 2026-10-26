@@ -104,6 +104,13 @@ fn java_usages_of_a_kotlin_class() {
 }
 
 #[test]
+fn an_unrelated_java_declaration_is_no_usage() {
+    let files = [("k/Repo.kt", "package k\nclass Repo {\n  fun load() {}\n}\nfun use(r: Repo) = r.load()\n"),
+                 ("j/Other.java", "package j;\nclass Other {\n  void load() {}\n}\n")];
+    assert_eq!(uses_in(&files, "k/Repo.kt", 2, "load", false), v(&["Repo.kt:4:21 E"]));
+}
+
+#[test]
 fn a_shadowing_local_is_not_a_property_usage() {
     let files = [("p/A.kt", "package p\nclass A(val repo: Int) {\n  fun f() {\n    val repo = 2\n    repo\n  }\n  fun g() = repo\n}\n")];
     assert_eq!(uses_in(&files, "p/A.kt", 1, "repo", false), v(&["A.kt:6:12 E"]));

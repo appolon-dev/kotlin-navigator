@@ -128,7 +128,8 @@ pub fn resolve<'a>(index: &'a Index, current: &Current<'a>, sources: &Sources, b
 }
 
 /// Like `resolve`, but on the name of a declaration the target is that declaration alone:
-/// not, say, the actuals of an `expect`.
+/// not, say, the actuals of an `expect`. That is exact, even where a search by name found it,
+/// as in Java.
 pub fn target_at<'a>(index: &'a Index, current: &Current<'a>, sources: &Sources, byte: usize) -> Option<Resolution<'a>> {
     let mut resolution = resolve(index, current, sources, byte)?;
     let span = span_at(current.text, resolution.reference.range.clone());
@@ -139,6 +140,7 @@ pub fn target_at<'a>(index: &'a Index, current: &Current<'a>, sources: &Sources,
     if let Some(i) = here {
         let own = resolution.found.swap_remove(i);
         resolution.found = vec![own];
+        resolution.certainty = Exact;
     }
     Some(resolution)
 }
