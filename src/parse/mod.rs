@@ -68,7 +68,11 @@ pub(crate) fn ident_text(text: &str, node: Node) -> String {
 
 /// Dotted path text without whitespace and backticks: `a . `b` .C` → `a.b.C`.
 pub(crate) fn dotted_text(text: &str, node: Node) -> String {
-    text[node.byte_range()].chars().filter(|c| !c.is_whitespace() && *c != '`').collect()
+    clean_dotted(&text[node.byte_range()])
+}
+
+pub(crate) fn clean_dotted(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace() && *c != '`').collect()
 }
 
 pub(crate) fn qualify(prefix: &str, name: &str) -> String {
