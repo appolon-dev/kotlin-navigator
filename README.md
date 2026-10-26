@@ -2,7 +2,7 @@
 
 A small language server for **Go to Definition across modules in large Kotlin/Java (Android, KMP) projects**. It never runs Gradle, the Kotlin compiler, a JVM or Android Studio: it parses sources with tree-sitter and keeps a compact declaration index in memory.
 
-This is **stage 4** of the Rust rewrite (designs: `docs/superpowers/specs/2026-10-25-rust-navigator-design.md`, `docs/superpowers/specs/2026-10-26-rust-navigator-stage2-design.md`, `docs/superpowers/specs/2026-10-26-rust-navigator-stage3-design.md`, `docs/superpowers/specs/2026-10-26-rust-navigator-stage4-design.md`). Stage 1 reached parity with the original Python prototype, now kept in `legacy/`; stage 2 added members and locals; stage 3 added Find All References, implementations, type definition and highlighting; stage 4 adds the Zed extension and prebuilt macOS binaries.
+This is **stage 4** of the Rust rewrite. Stage 1 reached parity with the original Python prototype, now kept in `legacy/`; stage 2 added members and locals; stage 3 added Find All References, implementations, type definition and highlighting; stage 4 adds the Zed extension and prebuilt macOS binaries.
 
 ## What it does
 
