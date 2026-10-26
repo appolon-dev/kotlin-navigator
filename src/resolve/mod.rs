@@ -1,10 +1,14 @@
 //! What is under the cursor, and which declarations it may refer to.
 
+pub mod context;
+
 use tree_sitter::{Node, Tree};
+
+use self::context::import_fqn;
 
 use crate::index::Index;
 use crate::model::{Decl, FileSummary, Import};
-use crate::parse::{clean_dotted, ident_text, named_child_of_kind};
+use crate::parse::ident_text;
 
 pub const MAX_CANDIDATES: usize = 50;
 
@@ -25,29 +29,6 @@ pub fn reference_at(tree: &Tree, text: &str, byte: usize) -> Option<Reference> {
 fn identifier_at(root: Node, byte: usize) -> Option<Node> {
     let node = root.named_descendant_for_byte_range(byte, byte)?;
     matches!(node.kind(), "identifier" | "type_identifier").then_some(node)
-}
-
-fn import_fqn(text: &str, ident: Node) -> Option<String> {
-    let mut current = ident.parent();
-    while let Some(node) = current {
-        let path = match node.kind() {
-            "import" => named_child_of_kind(node, "qualified_identifier"),
-            "import_declaration" => {
-                let mut cursor = node.walk();
-                node.named_children(&mut cursor).find(|c| matches!(c.kind(), "scoped_identifier" | "identifier"))
-            }
-            _ => {
-                current = node.parent();
-                continue;
-            }
-        };
-        let path = path?;
-        // An alias (`import a.B as C`) lies outside the path: it means the whole path.
-        let inside = path.byte_range().contains(&ident.start_byte());
-        let end = if inside { ident.end_byte() } else { path.end_byte() };
-        return Some(clean_dotted(&text[path.start_byte()..end]));
-    }
-    None
 }
 
 /// Candidates in Python-version order: import path, explicit import, own file,

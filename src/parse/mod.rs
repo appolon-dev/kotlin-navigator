@@ -80,6 +80,19 @@ pub(crate) fn dotted_text(text: &str, node: Node) -> String {
     clean_dotted(&text[node.byte_range()])
 }
 
+/// `a.b.C` built only from identifiers and `.`; anything else (calls, `?.`, `::`) is None.
+pub(crate) fn dotted_identifiers(text: &str, node: Node) -> Option<String> {
+    match node.kind() {
+        "identifier" => Some(ident_text(text, node)),
+        "navigation_expression" if node.children(&mut node.walk()).any(|c| c.kind() == ".") => {
+            let left = dotted_identifiers(text, node.named_child(0)?)?;
+            let right = node.named_child(1).filter(|r| r.kind() == "identifier")?;
+            Some(format!("{left}.{}", ident_text(text, right)))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn clean_dotted(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace() && *c != '`').collect()
 }

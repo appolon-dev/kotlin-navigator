@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use tree_sitter::{Node, Tree};
 
 use self::recover::recover;
-use super::{DeclSink, dotted_text, ident_text, named_child_of_kind, parse, type_name};
+use super::{DeclSink, dotted_identifiers, dotted_text, ident_text, named_child_of_kind, parse, type_name};
 use crate::model::{DeclKind, FileSummary, Flags, Import, Lang};
 use crate::source_set::source_set_of;
 
@@ -234,19 +234,6 @@ fn call_type(text: &str, init: Node) -> Option<String> {
     let name = dotted_identifiers(text, init.named_child(0)?)?;
     let last = name.rsplit('.').next()?;
     last.starts_with(|c: char| c.is_uppercase()).then_some(name)
-}
-
-/// `a.b.C` built only from identifiers and `.`; anything else (calls, `?.`, `::`) is None.
-fn dotted_identifiers(text: &str, node: Node) -> Option<String> {
-    match node.kind() {
-        "identifier" => Some(ident_text(text, node)),
-        "navigation_expression" if anonymous_child(node, ".").is_some() => {
-            let left = dotted_identifiers(text, node.named_child(0)?)?;
-            let right = node.named_child(1).filter(|r| r.kind() == "identifier")?;
-            Some(format!("{left}.{}", ident_text(text, right)))
-        }
-        _ => None,
-    }
 }
 
 fn modifier_flags(text: &str, node: Node) -> Flags {
