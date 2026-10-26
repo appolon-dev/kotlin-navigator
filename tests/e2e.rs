@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 fn version_flag_prints_name_and_version() {
     let out = Command::new(env!("CARGO_BIN_EXE_kotlin-navigator")).arg("--version").output().unwrap();
     assert!(out.status.success());
-    assert_eq!(String::from_utf8(out.stdout).unwrap(), "kotlin-navigator 0.2.0\n");
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "kotlin-navigator 0.3.0\n");
 }
 
 fn send(stdin: &mut impl Write, msg: Message) {
@@ -143,4 +143,9 @@ fn bench_prints_report() {
     assert!(text.contains("\ndefinition_samples: 1000\n"));
     assert!(text.contains("\ndefinition_one_pct: "));
     assert!(text.contains("\ndefinition_p95_us: "));
+    assert!(text.contains("\nreferences_samples: 200\n"));
+    assert!(text.contains("\nreferences_p95_ms: "));
+    assert!(text.contains("\nreferences_max_ms: "));
+    assert!(text.contains("\nreferences_probable_pct: "));
+    assert!(text.contains("\nhighlight_p95_us: "));
 }
