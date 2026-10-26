@@ -1,4 +1,4 @@
-use kotlin_navigator::{docs::byte_offset, index::Index, parse::summarize_text, resolve::{definition, reference_at}};
+use kotlin_navigator::{docs::byte_offset, index::Index, parse::summarize_text, resolve::{definition, Current}};
 use std::path::PathBuf;
 
 /// Возвращает "путь:строка" для каждого кандидата.
@@ -11,8 +11,8 @@ fn goto(files: &[(&str, &str)], from: &str, line: u32, col: u32) -> Vec<String> 
         index.upsert(summary);
     }
     let (tree, summary, text) = current.unwrap();
-    let Some(r) = reference_at(&tree, &text, byte_offset(&text, line, col).unwrap()) else { return vec![] };
-    definition(&index, &summary, &r).iter().map(|(f, d)| format!("{}:{}", f.path.display(), d.name_range.line)).collect()
+    let current = Current { text: &text, tree: &tree, summary: &summary };
+    definition(&index, &current, byte_offset(&text, line, col).unwrap()).iter().map(|t| format!("{}:{}", t.path.display(), t.range.line)).collect()
 }
 
 const DOMAIN: (&str, &str) = ("/ws/domain/src/StakingRepository.kt", "package com.example.domain\nclass StakingRepository {}\n");

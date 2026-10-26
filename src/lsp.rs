@@ -135,9 +135,13 @@ pub fn definition(state: &State, path: &Path, position: Position) -> Vec<Locatio
         }
     };
     let Some(byte) = docs::byte_offset(text, position.line, position.character) else { return Vec::new() };
-    let Some(reference) = resolve::reference_at(tree, text, byte) else { return Vec::new() };
     let index = read(&state.index);
-    resolve::definition(&index, summary, &reference).into_iter().map(|(f, d)| location(f, d)).collect()
+    let summary = if docs.get(path).is_some() { summary } else { index.file(path).unwrap_or(summary) };
+    let current = resolve::Current { text, tree, summary };
+    resolve::definition(&index, &current, byte)
+        .into_iter()
+        .map(|t| Location { uri: path_to_uri(&t.path), range: range(t.range) })
+        .collect()
 }
 
 pub fn workspace_symbols(state: &State, query: &str) -> Vec<SymbolInformation> {

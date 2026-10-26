@@ -10,22 +10,21 @@ pub type DeclRef<'a> = (&'a FileSummary, &'a Decl);
 
 /// Candidates of the best kind tier for the role; all of them if none fits.
 pub fn prefer<'a>(role: &Role, candidates: Vec<DeclRef<'a>>) -> Vec<DeclRef<'a>> {
-    let class_like = |k: DeclKind| k.is_class_like();
-    let function = |k: DeclKind| k == DeclKind::Function;
-    let tiers: Vec<&dyn Fn(DeclKind) -> bool> = match role {
-        Role::Type => vec![&class_like],
-        Role::Call => vec![&function, &class_like],
-        Role::CallableRef => vec![&|k| matches!(k, DeclKind::Function | DeclKind::Property) || k.is_class_like()],
-        Role::Expr => vec![&|k| matches!(k, DeclKind::Property | DeclKind::EnumEntry) || k.is_class_like()],
-        Role::Import(_) => vec![],
+    let Some(best) = candidates.iter().filter_map(|(_, d)| tier(role, d.kind)).min() else { return candidates };
+    candidates.into_iter().filter(|(_, d)| tier(role, d.kind) == Some(best)).collect()
+}
+
+/// The kind tier of a declaration for a role, best first; None when it does not fit.
+pub(crate) fn tier(role: &Role, kind: DeclKind) -> Option<usize> {
+    let fits = match role {
+        Role::Type => kind.is_class_like(),
+        Role::Call if kind == DeclKind::Function => return Some(0),
+        Role::Call => return kind.is_class_like().then_some(1),
+        Role::CallableRef => matches!(kind, DeclKind::Function | DeclKind::Property) || kind.is_class_like(),
+        Role::Expr => matches!(kind, DeclKind::Property | DeclKind::EnumEntry) || kind.is_class_like(),
+        Role::Import(_) => false,
     };
-    for fits in tiers {
-        let selected: Vec<_> = candidates.iter().copied().filter(|(_, d)| fits(d.kind)).collect();
-        if !selected.is_empty() {
-            return selected;
-        }
-    }
-    candidates
+    fits.then_some(0)
 }
 
 /// Visibility, stage-1 levels, source set, module order and expect/actual, capped at `MAX_CANDIDATES`.
