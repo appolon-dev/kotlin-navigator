@@ -1,6 +1,7 @@
 //! What is under the cursor, and which declarations it may refer to.
 
 pub mod context;
+pub mod rank;
 pub mod scope;
 
 use tree_sitter::{Node, Tree};
