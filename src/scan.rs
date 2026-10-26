@@ -65,6 +65,19 @@ pub fn walk_sources(roots: &[PathBuf]) -> Vec<PathBuf> {
     found.into_iter().collect()
 }
 
+/// Whether the walk reaches `path` by its location: under a root, with no hidden or
+/// skipped directory in between. Ignore files are not consulted.
+pub fn in_workspace(roots: &[PathBuf], path: &Path) -> bool {
+    roots.iter().any(|root| {
+        path.strip_prefix(root).is_ok_and(|rel| {
+            !rel.parent().into_iter().flat_map(Path::components).any(|c| match c {
+                Component::Normal(n) => n.as_encoded_bytes().starts_with(b".") || SKIP_DIRS.iter().any(|d| n == *d),
+                _ => true,
+            })
+        })
+    })
+}
+
 /// `.kt`/`.java` files tracked by git under `root`; empty when git or the repository is unavailable.
 fn git_tracked_sources(root: &Path) -> Vec<PathBuf> {
     let output = Command::new("git")

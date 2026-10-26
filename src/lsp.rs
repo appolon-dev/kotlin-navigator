@@ -31,16 +31,18 @@ const REQUEST_THREADS: usize = 4;
 pub struct State {
     pub index: RwLock<Index>,
     pub docs: RwLock<Documents>,
+    roots: Vec<PathBuf>,
     ready: Mutex<bool>,
     ready_changed: Condvar,
     ready_timeout: Duration,
 }
 
 impl State {
-    pub fn new(ready_timeout: Duration) -> Arc<State> {
+    pub fn new(roots: Vec<PathBuf>, ready_timeout: Duration) -> Arc<State> {
         Arc::new(State {
             index: RwLock::default(),
             docs: RwLock::default(),
+            roots,
             ready: Mutex::new(false),
             ready_changed: Condvar::new(),
             ready_timeout,
@@ -62,11 +64,19 @@ impl State {
         *ready
     }
 
+    /// Whether `path` belongs in the index: the scan found it, or it lies where the scan
+    /// looks. Buffers from elsewhere (other worktrees, generated sources) still navigate.
+    fn indexable(&self, index: &Index, path: &Path) -> bool {
+        scan::is_indexed(path)
+            && (index.file(path).is_some() || self.roots.is_empty() || scan::in_workspace(&self.roots, path))
+    }
+
     pub fn open_or_change(&self, path: PathBuf, text: String) {
         let mut docs = write(&self.docs);
         let Some(doc) = docs.set(path.clone(), text) else { return };
-        if scan::is_indexed(&path) {
-            write(&self.index).upsert(doc.summary.clone());
+        let mut index = write(&self.index);
+        if self.indexable(&index, &path) {
+            index.upsert(doc.summary.clone());
         }
     }
 
@@ -78,7 +88,7 @@ impl State {
     /// Re-reads a file that is not open in the editor; a missing or unreadable file leaves the index.
     pub fn reload_from_disk(&self, path: &Path) {
         let docs = read(&self.docs);
-        if docs.get(path).is_some() || !scan::is_indexed(path) {
+        if docs.get(path).is_some() || !self.indexable(&read(&self.index), path) {
             return;
         }
         let summary = scan::read_source(path).and_then(|text| parse::summarize_text(path.to_path_buf(), &text));
@@ -92,8 +102,10 @@ impl State {
     /// Installs the freshly built index; open buffers win over what was read from disk.
     pub fn finish_indexing(&self, mut index: Index) {
         let docs = read(&self.docs);
-        for doc in docs.iter().filter(|d| scan::is_indexed(&d.summary.path)) {
-            index.upsert(doc.summary.clone());
+        for doc in docs.iter() {
+            if self.indexable(&index, &doc.summary.path) {
+                index.upsert(doc.summary.clone());
+            }
         }
         *write(&self.index) = index;
         drop(docs);
@@ -198,10 +210,10 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
         }),
     )?;
 
-    let state = State::new(READY_TIMEOUT);
+    let state = State::new(roots, READY_TIMEOUT);
     let indexer_state = Arc::clone(&state);
     std::thread::Builder::new().name("indexer".into()).spawn(move || {
-        let (index, stats) = scan::build_index(&roots);
+        let (index, stats) = scan::build_index(&indexer_state.roots);
         log::info!(
             "indexed {} files, {} declarations ({} with parse errors, {} unreadable) in {} ms",
             stats.files,

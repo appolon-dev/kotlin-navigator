@@ -83,7 +83,7 @@ fn unknown_request_is_method_not_found() {
 
 #[test]
 fn request_waits_for_index_then_answers_from_open_buffers() {
-    let state = State::new(Duration::from_millis(50));
+    let state = State::new(Vec::new(), Duration::from_millis(50));
     let path = PathBuf::from("/ws/a/Use.kt");
     state.open_or_change(path.clone(), "package a\nclass Repo\nval r: Repo? = null\n".into());
     let started = Instant::now();
@@ -91,4 +91,33 @@ fn request_waits_for_index_then_answers_from_open_buffers() {
     assert!(started.elapsed() >= Duration::from_millis(50));
     assert_eq!(locs.len(), 1);
     assert_eq!(locs[0].range.start.line, 1);
+}
+
+#[test]
+fn buffers_where_the_scan_does_not_look_navigate_but_stay_out_of_the_index() {
+    let (dir, domain, feature) = workspace();
+    let mut c = Client::start(dir.path());
+    let worktree_copy = dir.path().join(".claude/worktrees/w1/domain/src/StakingRepository.kt");
+    let generated_copy = dir.path().join("domain/build/generated/StakingRepository.kt");
+    let worktree_feature = dir.path().join(".claude/worktrees/w1/feature/src/StakingViewModel.kt");
+    for (p, t) in [(&worktree_copy, DOMAIN_TEXT), (&generated_copy, DOMAIN_TEXT), (&worktree_feature, FEATURE_TEXT)] {
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, t).unwrap();
+        open(&c, p, t);
+    }
+    assert_eq!(symbols(&mut c, "StakingRepository").len(), 1);
+    let at = |p: &PathBuf| json!({"textDocument": {"uri": uri(p)}, "position": {"line": 2, "character": 36}});
+    for from in [&feature, &worktree_feature] {
+        let res = c.request("textDocument/definition", at(from)).unwrap();
+        assert_eq!(res.as_array().unwrap().len(), 1);
+        assert_eq!(res[0]["uri"], uri(&domain));
+    }
+    for p in [&worktree_copy, &generated_copy] {
+        c.notify("textDocument/didClose", json!({"textDocument": {"uri": uri(p)}}));
+    }
+    assert_eq!(symbols(&mut c, "StakingRepository").len(), 1);
+    // A new file in an ordinary source directory is indexed as soon as it is opened.
+    open(&c, &dir.path().join("domain/src/Fresh.kt"), "package com.example.domain\nclass Fresh\n");
+    assert_eq!(symbols(&mut c, "Fresh").len(), 1);
+    c.shutdown();
 }
