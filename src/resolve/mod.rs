@@ -2,6 +2,7 @@
 
 pub mod args;
 pub mod context;
+pub mod family;
 pub mod members;
 pub mod rank;
 pub mod scope;
@@ -123,6 +124,22 @@ pub fn resolve<'a>(index: &'a Index, current: &Current<'a>, sources: &Sources, b
         }
     };
     Some(Resolution { reference, found, certainty })
+}
+
+/// Like `resolve`, but on the name of a declaration the target is that declaration alone:
+/// not, say, the actuals of an `expect`.
+pub fn target_at<'a>(index: &'a Index, current: &Current<'a>, sources: &Sources, byte: usize) -> Option<Resolution<'a>> {
+    let mut resolution = resolve(index, current, sources, byte)?;
+    let span = span_at(current.text, resolution.reference.range.clone());
+    let here = resolution.found.iter().position(|f| {
+        let target = f.target();
+        target.path == current.summary.path && target.range == span
+    });
+    if let Some(i) = here {
+        let own = resolution.found.swap_remove(i);
+        resolution.found = vec![own];
+    }
+    Some(resolution)
 }
 
 /// A named-argument label: the parameter of the callee, found in the file that declares it.

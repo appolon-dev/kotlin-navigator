@@ -1,6 +1,6 @@
 use kotlin_navigator::index::Index;
 use kotlin_navigator::parse::summarize_text;
-use kotlin_navigator::resolve::{resolve, Certainty::{self, *}, Current, Found};
+use kotlin_navigator::resolve::{resolve, target_at, Certainty::{self, *}, Current, Found};
 use kotlin_navigator::scan::build_index;
 use kotlin_navigator::sources::Sources;
 use std::path::{Path, PathBuf};
@@ -28,6 +28,14 @@ fn how(rel: &str, line: usize, needle: &str) -> Option<(Certainty, Vec<String>)>
     let doc = sources.load(&root().join(rel)).unwrap();
     let current = Current::of(&index, &doc);
     resolve(&index, &current, &sources, byte_of(&doc.text, line, needle)).map(|r| (r.certainty, show(&r.found)))
+}
+/// Like `how`, through `target_at`.
+fn target(rel: &str, line: usize, needle: &str) -> Option<(Certainty, Vec<String>)> {
+    let (index, _) = build_index(&[root()]);
+    let sources = Sources::default();
+    let doc = sources.load(&root().join(rel)).unwrap();
+    let current = Current::of(&index, &doc);
+    target_at(&index, &current, &sources, byte_of(&doc.text, line, needle)).map(|r| (r.certainty, show(&r.found)))
 }
 /// The same for files that exist only in memory.
 fn mem(files: &[(&str, &str)], from: &str, line: usize, needle: &str) -> Option<(Certainty, Vec<String>)> {
@@ -90,4 +98,12 @@ fn labels_of_local_functions_constructors_and_missing_parameters() {
     assert_eq!(mem(&files, "/ws/a/U.kt", 5, "plain ="), Some((Exact, v(&["U.kt:1 local"]))));
     assert_eq!(mem(&files, "/ws/a/U.kt", 5, "a ="), Some((Exact, v(&["U.kt:2 local"]))));
     assert_eq!(mem(&files, "/ws/a/U.kt", 5, "b ="), Some((Exact, vec![])));
+}
+
+#[test]
+fn on_a_declaration_the_target_is_that_declaration() {
+    let platform = "core/src/commonMain/kotlin/com/fx/core/Platform.kt";
+    assert_eq!(how(platform, 2, "platformName").map(|(_, t)| t.len()), Some(3)); // definition lists the actuals too
+    assert_eq!(target(platform, 2, "platformName"), Some((Exact, v(&["Platform.kt:2"]))));
+    assert_eq!(target(SCREEN, 10, "load"), Some((Exact, v(&["Repo.kt:9"]))));
 }

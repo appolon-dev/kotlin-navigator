@@ -103,7 +103,7 @@ pub fn supertype_members<'a>(index: &'a Index, ty: &Ty<'a>, name: &str) -> (Vec<
 }
 
 /// Declarations named `name` directly inside `owner`, plus inside its companion when asked.
-fn own_members<'a>(file: &'a FileSummary, owner: &'a Decl, name: &str, companion: bool) -> Vec<DeclRef<'a>> {
+pub(crate) fn own_members<'a>(file: &'a FileSummary, owner: &'a Decl, name: &str, companion: bool) -> Vec<DeclRef<'a>> {
     let mut found: Vec<DeclRef> = children(file, owner).filter(|d| d.name == name).map(|d| (file, d)).collect();
     if companion {
         for c in children(file, owner).filter(|c| c.flags.contains(Flags::COMPANION)) {
@@ -111,6 +111,11 @@ fn own_members<'a>(file: &'a FileSummary, owner: &'a Decl, name: &str, companion
         }
     }
     found
+}
+
+/// The declaration enclosing `decl` in its file.
+pub(crate) fn container<'a>(file: &'a FileSummary, decl: &Decl) -> Option<&'a Decl> {
+    decl.container.and_then(|i| file.decls.get(i as usize))
 }
 
 fn children<'a>(file: &'a FileSummary, owner: &'a Decl) -> impl Iterator<Item = &'a Decl> {
