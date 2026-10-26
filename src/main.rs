@@ -53,6 +53,16 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [] => serve(),
+        [flag, root] if flag == "--bench" => match kotlin_navigator::bench::run(std::path::Path::new(root)) {
+            Ok(report) => {
+                print!("{report}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{e:#}");
+                ExitCode::FAILURE
+            }
+        },
         [flag] if flag == "--version" => {
             println!("kotlin-navigator {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS

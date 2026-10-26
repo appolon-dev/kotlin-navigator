@@ -75,3 +75,14 @@ fn stdio_handshake_and_definition() {
     };
     assert!(status.success());
 }
+
+#[test]
+fn bench_prints_report() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("A.kt"), "class A\nclass B\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_kotlin-navigator")).arg("--bench").arg(dir.path()).output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.starts_with("files: 1\nskipped: 0\ndecls: 2\nparse_error_files: 0\ncold_index_ms: "));
+    assert!(text.contains("\npeak_rss_mb: "));
+}

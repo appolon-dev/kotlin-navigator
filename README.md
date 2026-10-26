@@ -1,17 +1,24 @@
-# Kotlin Navigator for Zed (experimental MVP)
+# Kotlin Navigator for Zed
 
-A tiny LSP for **Go to Definition of Kotlin and Java class-like symbols across modules**. It never calls Gradle, Kotlin compiler, JVM or Android Studio. Standard-library Python 3.9+. It relies on source scanning; **not a semantic Kotlin compiler**.
+A small language server for **Go to Definition across modules in large Kotlin/Java (Android, KMP) projects**. It never runs Gradle, the Kotlin compiler, a JVM or Android Studio: it parses sources with tree-sitter and keeps a compact declaration index in memory.
+
+This is **stage 1** of the Rust rewrite (design: `docs/superpowers/specs/2026-10-25-rust-navigator-design.md`). It reaches parity with the original Python prototype, now kept in `legacy/`.
+
+## What stage 1 does
+
+- `textDocument/definition` for class-like symbols: classes of every kind, interfaces (incl. `fun interface`), objects, companion objects, enum classes and their entries, type aliases, Java records and annotation types. Nested classes (`Outer.Inner`) are resolved through their full name.
+- Candidate ranking: an explicit import (incl. `as` aliases), then the same file, the same package, wildcard imports; otherwise all candidates (up to 50). Clicking inside an `import` line jumps to exactly that class.
+- `workspace/symbol`: case-insensitive substring search, exact and prefix matches first, up to 100 results.
+- Unsaved buffers win over files on disk (`didOpen`, full-sync `didChange`); `didClose`, `didSave` and `workspace/didChangeWatchedFiles` refresh from disk. An open `build.gradle.kts` can navigate but is not indexed.
+- The workspace walk honours `.gitignore`, `.ignore`, `.git/info/exclude` and the global gitignore, skips hidden directories (so `.claude/worktrees` is not indexed) and `build`, `out`, `target`, `bin`, `node_modules`, `generated`, plus files over 2 MB. Files tracked by git are always indexed, even if an ignore rule matches them.
 
 ## Install on macOS
 
-1. Keep the ordinary **Kotlin** Zed extension installed.
-2. Open Terminal, enter this folder and run `./install.sh`. It installs `navigator.py` into `~/.local/share/kotlin-navigator/` and prints your exact Zed settings.
-3. Merge the printed JSON into `~/.config/zed/settings.json` (do not replace other unrelated settings).
-4. Restart Zed, open the **repository root**, open any `.kt` file, then try `Cmd + Click` on a class from another module.
-
-No Gradle import is performed; the index is built from all `.kt`/`.java` source files in the workspace in a background thread. The first lookup may block briefly until indexing finishes. Use `Cmd + Shift + P` → `dev: open language server logs` to troubleshoot.
-
-### Settings template (edit your user paths; installer prints correct ones)
+1. Install Rust from <https://rustup.rs> if `cargo` is missing.
+2. Keep the ordinary **Kotlin** Zed extension installed.
+3. Run `./install.sh`. It builds a release binary, copies it to `~/.local/share/kotlin-navigator/kotlin-navigator` and prints the Zed settings to merge.
+4. Merge the snippet into `~/.config/zed/settings.json` without replacing unrelated settings. Keep `"arguments": []`: otherwise the arguments of the old Python setup (`-u .../navigator.py`) survive the merge and the server refuses to start.
+5. Restart Zed, open the **repository root**, then `Cmd + Click` a class from another module.
 
 ```json
 {
@@ -24,38 +31,50 @@ No Gradle import is performed; the index is built from all `.kt`/`.java` source 
   "lsp": {
     "kotlin-language-server": {
       "binary": {
-        "path": "/path/to/python3",
-        "arguments": ["-u", "/Users/YOU/.local/share/kotlin-navigator/navigator.py"]
+        "path": "/Users/YOU/.local/share/kotlin-navigator/kotlin-navigator",
+        "arguments": []
       }
     }
   }
 }
 ```
 
-This uses Zed's documented per-LSP binary override to run our program under the ID of the already installed Kotlin extension's alternate LSP. That avoids writing a separate Rust/WASM Zed extension for the first prototype. **Zed integration is unverified on your machine**, so if the extension ignores the binary override, we can create a dedicated extension wrapper.
+This uses Zed's per-server binary override to run the navigator under the ID of the Kotlin extension's language server.
 
-## Capabilities
+## Limitations of stage 1
 
-- `textDocument/definition`: map `Name` to a class/interface/object/typealias/enum/record in `.kt` or `.java`.
-- `workspace/symbol`: fuzzy substring search of class names across repo.
-- Explicit import, import alias, same file/package and wildcard-import heuristics.
-- Live unsaved buffers (`didOpen`, full-sync `didChange`) and `didSave`/`didClose` refreshes.
-- Returns multiple candidates for ambiguous names instead of silently choosing the wrong one.
-
-## Limitations
-
-- Regular-expression index: may mistake class names in comments or strings for declarations, and may not understand nested classes, Kotlin complex syntax and multicline class modifiers.
-- No Gradle variant graph, type inference, overload resolution, generics, generated sources, dependencies from AAR/JAR, or reliable method/property navigation.
-- Ignores the `build/` and `generated/` directories. Index refresh of external on-disk changes relies on editor LSP file-watch notifications; restarting Zed always refreshes.
-- Does not verify import visibility or module dependencies. With common names used in different modules it may return several candidates.
-- Index operation is multi-threaded and intended for quick personal experiments, not production use.
+- Only class-like symbols. Functions, properties, parameters and locals, Find Usages, an on-disk cache and file-watch registration come in later stages.
+- No type inference, overload resolution, Gradle variant graph, generated sources or classes from AAR/JAR dependencies. An explicitly imported class that is not in the workspace (a library class) yields no result rather than a same-named project class.
 
 ## Diagnostics
 
-Set environment variable `KOTLIN_NAVIGATOR_DEBUG=1` in the `binary.env` section to print indexing stats to LSP stderr. All protocol messages go to stdout only.
+Logs go to stderr; view them with `Cmd + Shift + P` → `dev: open language server logs`. Set the level with `KOTLIN_NAVIGATOR_LOG` (`error`, `warn` by default, `info`, `debug`, `trace`) in the `binary.env` section:
 
-## Run tests
+```json
+"binary": { "path": "...", "arguments": [], "env": { "KOTLIN_NAVIGATOR_LOG": "info" } }
+```
+
+## Benchmark
+
+`kotlin-navigator --bench <root>` indexes `<root>` once and prints file and declaration counts, files with parse errors, cold indexing time and peak memory.
+
+Measured on a real KMP project (2026-10-26, Apple Silicon, 10 cores):
+
+| | Python prototype | Rust, stage 1 |
+|---|---|---|
+| files indexed | 42 150 (walked into 18 git worktrees) | 4 924 |
+| cold index | 34.8 s | 0.75–1.3 s |
+| peak memory | 147 MB | 32–34 MB |
+
+## Tests
 
 ```bash
-python3 -m unittest discover -s tests -v
+cargo test
+python3 -m unittest discover -s legacy/tests -v   # Python reference
 ```
+
+Two legacy tests fail on macOS because the prototype resolves `/var` to `/private/var` while the tests compare unresolved temp paths; that behaviour is left as it was.
+
+## Rolling back to Python
+
+`install.sh` leaves `~/.local/share/kotlin-navigator/navigator.py` in place. Point `binary.path` back to `python3` with `"arguments": ["-u", "/Users/YOU/.local/share/kotlin-navigator/navigator.py"]`; `legacy/install.sh` reinstalls it.

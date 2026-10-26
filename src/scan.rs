@@ -1,7 +1,8 @@
 //! Workspace walk (gitignore-aware) and parallel initial indexing.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use ignore::WalkBuilder;
@@ -50,8 +51,40 @@ pub fn walk_sources(roots: &[PathBuf]) -> Vec<PathBuf> {
                 found.insert(path.to_path_buf());
             }
         }
+        // Ignore rules never apply to files git already tracks (e.g. `.git/info/exclude: keys`
+        // hitting a tracked `navigation/keys/` package), so add those back.
+        for path in git_tracked_sources(root) {
+            let in_skipped_dir = path.strip_prefix(root).is_ok_and(|rel| {
+                rel.parent().into_iter().flat_map(Path::components).any(|c| matches!(c, Component::Normal(n) if SKIP_DIRS.iter().any(|d| n == *d)))
+            });
+            if !in_skipped_dir && std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() <= MAX_FILE_SIZE) {
+                found.insert(path);
+            }
+        }
     }
     found.into_iter().collect()
+}
+
+/// `.kt`/`.java` files tracked by git under `root`; empty when git or the repository is unavailable.
+fn git_tracked_sources(root: &Path) -> Vec<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z", "--", "*.kt", "*.java"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    let Ok(output) = output else { return Vec::new() };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    output
+        .stdout
+        .split(|b| *b == 0)
+        .filter_map(|rel| std::str::from_utf8(rel).ok())
+        .filter(|rel| !rel.is_empty())
+        .map(|rel| root.join(rel))
+        .collect()
 }
 
 pub fn read_source(path: &Path) -> Option<String> {

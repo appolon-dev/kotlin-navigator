@@ -1,3 +1,4 @@
+pub mod bench;
 pub mod docs;
 pub mod index;
 pub mod lsp;

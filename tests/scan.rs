@@ -37,3 +37,19 @@ fn build_index_skips_non_utf8_files() {
     assert_eq!(idx.lookup("A").len(), 1);
     assert_eq!(idx.file_count(), 1);
 }
+
+#[test]
+fn git_tracked_sources_are_kept_even_when_ignored() {
+    // Like `.git/info/exclude: keys` hitting a tracked `navigation/keys/` package.
+    let dir = tempfile::tempdir().unwrap();
+    let r = dir.path();
+    let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(r).args(args).output().unwrap().status.success());
+    git(&["init", "-q"]);
+    write(r, ".git/info/exclude", b"keys\n");
+    write(r, "nav/keys/ScreenKey.kt", b"class ScreenKey");
+    write(r, "nav/keys/Untracked.kt", b"class Untracked");
+    git(&["add", "-f", "nav/keys/ScreenKey.kt"]);
+    let found: Vec<String> = walk_sources(&[r.to_path_buf()]).iter()
+        .map(|p| p.strip_prefix(r).unwrap().to_string_lossy().into_owned()).collect();
+    assert_eq!(found, vec!["nav/keys/ScreenKey.kt"]);
+}
