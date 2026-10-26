@@ -1,6 +1,7 @@
 pub mod bench;
 pub mod cancel;
 pub mod docs;
+pub mod highlight;
 pub mod index;
 pub mod lsp;
 pub mod model;

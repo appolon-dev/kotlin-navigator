@@ -128,3 +128,37 @@ fn a_set_flag_cancels_the_search() {
     cancel.set();
     assert_eq!(references(&index, &current, &sources, byte_of(&doc.text, 7, "Repo"), false, &cancel), Err(Cancelled));
 }
+
+fn marks(rel: &str, line: usize, needle: &str) -> Vec<(u32, u32, bool)> {
+    let (index, _) = build_index(&[root()]);
+    let sources = Sources::default();
+    let doc = sources.load(&root().join(rel)).unwrap();
+    let current = Current::of(&index, &doc);
+    kotlin_navigator::highlight::highlight(&index, &current, &sources, byte_of(&doc.text, line, needle))
+        .iter().map(|h| (h.range.line, h.range.start, h.write)).collect()
+}
+
+#[test]
+fn highlight_tells_writes_from_reads() {
+    assert_eq!(marks(USAGES, 13, "total"), vec![(12, 8, true), (13, 4, true), (14, 4, true), (14, 27, false)]);
+    assert_eq!(marks(REPO, 9, "limit"), vec![(9, 13, true), (9, 43, false)]);
+}
+
+#[test]
+fn highlight_leaves_out_probable_places() {
+    assert_eq!(marks(SCREEN, 10, "load"), vec![(10, 13, false), (25, 14, false)]);
+}
+
+#[test]
+fn highlight_marks_member_assignment_as_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = "class A { var n = 0 }\nfun f(a: A) {\n    a.n = 1\n    a.n += 2\n    println(a.n)\n}\n";
+    std::fs::write(dir.path().join("A.kt"), text).unwrap();
+    let (index, _) = build_index(&[dir.path().to_path_buf()]);
+    let sources = Sources::default();
+    let doc = sources.load(&dir.path().join("A.kt")).unwrap();
+    let current = Current::of(&index, &doc);
+    let found = kotlin_navigator::highlight::highlight(&index, &current, &sources, byte_of(text, 2, "n ="));
+    let got: Vec<_> = found.iter().map(|h| (h.range.line, h.range.start, h.write)).collect();
+    assert_eq!(got, vec![(0, 14, true), (2, 6, true), (3, 6, true), (4, 14, false)]);
+}
