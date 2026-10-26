@@ -6,6 +6,7 @@ pub mod family;
 pub mod members;
 pub mod rank;
 pub mod scope;
+pub mod typedef;
 
 use std::path::PathBuf;
 

@@ -1,5 +1,6 @@
 use kotlin_navigator::index::Index;
 use kotlin_navigator::parse::summarize_text;
+use kotlin_navigator::resolve::typedef::type_definition;
 use kotlin_navigator::resolve::{resolve, target_at, Certainty::{self, *}, Current, Found};
 use kotlin_navigator::scan::build_index;
 use kotlin_navigator::sources::Sources;
@@ -106,4 +107,41 @@ fn on_a_declaration_the_target_is_that_declaration() {
     assert_eq!(how(platform, 2, "platformName").map(|(_, t)| t.len()), Some(3)); // definition lists the actuals too
     assert_eq!(target(platform, 2, "platformName"), Some((Exact, v(&["Platform.kt:2"]))));
     assert_eq!(target(SCREEN, 10, "load"), Some((Exact, v(&["Repo.kt:9"]))));
+}
+
+fn file_lines(found: Vec<kotlin_navigator::resolve::Target>) -> Vec<String> {
+    found.iter().map(|t| format!("{}:{}", t.path.file_name().unwrap().to_string_lossy(), t.range.line)).collect()
+}
+fn type_of(rel: &str, line: usize, needle: &str) -> Vec<String> {
+    let (index, _) = build_index(&[root()]);
+    let sources = Sources::default();
+    let doc = sources.load(&root().join(rel)).unwrap();
+    let current = Current::of(&index, &doc);
+    file_lines(type_definition(&index, &current, &sources, byte_of(&doc.text, line, needle)))
+}
+fn mem_type(files: &[(&str, &str)], from: &str, line: usize, needle: &str) -> Vec<String> {
+    let mut index = Index::default();
+    for (p, t) in files { index.upsert(summarize_text(PathBuf::from(p), t).unwrap().1); }
+    let text = files.iter().find(|(p, _)| *p == from).unwrap().1;
+    let (tree, summary) = summarize_text(PathBuf::from(from), text).unwrap();
+    let current = Current { text, tree: &tree, summary: &summary };
+    file_lines(type_definition(&index, &current, &Sources::default(), byte_of(text, line, needle)))
+}
+
+#[test]
+fn type_of_variables_calls_and_classes() {
+    assert_eq!(type_of(SCREEN, 12, "made"), ["Repo.kt:7"]);    // local typed by a constructor call
+    assert_eq!(type_of(SCREEN, 23, "repo"), ["Repo.kt:7"]);    // property
+    assert_eq!(type_of(USAGES, 7, "base"), ["Repo.kt:2"]);     // parameter
+    assert_eq!(type_of(SCREEN, 13, "create"), ["Repo.kt:7"]);  // function result
+    assert_eq!(type_of(SCREEN, 11, "Repo"), ["Repo.kt:7"]);    // a class is its own type
+    assert!(type_of(SCREEN, 19, "count").is_empty());          // Int is not in the project
+}
+
+#[test]
+fn type_parameters_and_generic_arguments_lead_nowhere() {
+    let files = [("/ws/a/U.kt", "package a\nclass Box\nfun <T> pick(): T = TODO()\nfun g(xs: List<Box>, b: Box) {\n  pick<Int>()\n  xs\n  b\n}\n")];
+    assert!(mem_type(&files, "/ws/a/U.kt", 4, "pick").is_empty());
+    assert!(mem_type(&files, "/ws/a/U.kt", 5, "xs").is_empty()); // List<Box> leads to List, not to Box
+    assert_eq!(mem_type(&files, "/ws/a/U.kt", 6, "b"), ["U.kt:1"]);
 }
