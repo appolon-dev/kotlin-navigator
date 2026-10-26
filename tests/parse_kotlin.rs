@@ -72,9 +72,12 @@ fn annotated_top_level_soft_keyword_declarations() {
 fn grammar_error_inside_class_body_keeps_class_and_fqns() {
     // Two `data object X : T() { override ... }` members in a row make the grammar emit one flat ERROR node.
     let text = "package p\nsealed class T {\n    data object A : T() { override val raw = \"a\" }\n\n    data object B : T() { override val raw = \"b\" }\n    companion object {\n        fun f() {\n            class Local\n        }\n    }\n}\nclass After\n";
-    assert_eq!(fqns(text), v(&[("p.T", Class), ("p.T.A", Object), ("p.T.B", Object), ("p.T.Companion", Object), ("p.After", Class)]));
-    let spans: Vec<Span> = summary(text).decls.iter().map(|d| d.name_range).collect();
-    assert_eq!(spans[2..], [Span { line: 4, start: 16, end: 17 }, Span { line: 5, start: 4, end: 13 }, Span { line: 11, start: 6, end: 11 }]);
+    assert_eq!(fqns(text), v(&[("p.T", Class), ("p.T.A", Object), ("p.T.A.raw", Property), ("p.T.B", Object), ("p.T.B.raw", Property),
+        ("p.T.Companion", Object), ("p.T.Companion.f", Function), ("p.After", Class)]));
+    let s = summary(text);
+    assert_eq!(decl(&s, "p.T.B").name_range, Span { line: 4, start: 16, end: 17 });
+    assert_eq!(decl(&s, "p.T.Companion").name_range, Span { line: 5, start: 4, end: 13 });
+    assert_eq!(decl(&s, "p.After").name_range, Span { line: 11, start: 6, end: 11 });
 }
 
 #[test]
@@ -83,7 +86,7 @@ fn whole_file_parsed_as_error_keeps_declarations() {
     let text = "package p\ninternal object E {\n    fun f(s: Any, override: Any?): Any? = when (s) {\n        is String -> override as? String\n    }\n}\n";
     let s = summary(text);
     assert_eq!(s.package, "p");
-    assert_eq!(fqns(text), v(&[("p.E", Object)]));
+    assert_eq!(fqns(text), v(&[("p.E", Object), ("p.E.f", Function)]));
 }
 
 #[test]
@@ -128,4 +131,13 @@ fn destructuring_and_qualified_constructor_calls() {
     for name in ["a", "y", "z", "w"] {
         assert_eq!(decl(&s, name).type_hint, None, "{name}");
     }
+}
+
+#[test]
+fn error_regions_recover_functions_and_properties() {
+    // The root is an ERROR (a parameter named `override`). tree-sitter drops the file's tail; names come from the text.
+    let text = "package p\ninternal object E {\n    fun f(s: Any, override: Any?): Any? = when (s) {\n        is String -> override as? String\n    }\n    val after = 1\n    fun <T> Repo.ext() {}\n}\n";
+    assert_eq!(fqns(text), v(&[("p.E", Object), ("p.E.f", Function), ("p.E.after", Property), ("p.E.ext", Function)]));
+    // Enum members after `;` land in an ERROR inside enum_class_body.
+    assert_eq!(fqns("package p\nenum class C { Q; fun g() {} }\n"), v(&[("p.C", Enum), ("p.C.Q", EnumEntry), ("p.C.g", Function)]));
 }

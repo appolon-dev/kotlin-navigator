@@ -1,8 +1,9 @@
 //! Declarations inside a Kotlin `ERROR` node. tree-sitter may leave the tokens after
 //! an error out of the tree entirely, so the node's text is lexed: `class`, `interface`,
-//! `object` or `typealias` followed by a name declares; the `{` after a declaration
-//! header opens its body, any other `{` opens a block whose declarations are local and
-//! skipped. Complete declarations and bodies inside the error are read from the tree.
+//! `object` or `typealias` followed by a name declares, and so do `fun`, `val` and `var`
+//! (`fun <T> Repo.name`); the `{` after a class-like header opens its body, any other `{`
+//! opens a block whose declarations are local and skipped. Complete declarations and
+//! bodies inside the error are read from the tree.
 
 use std::ops::Range;
 
@@ -12,8 +13,17 @@ use super::{DeclSink, declare, visit};
 use crate::model::DeclKind;
 
 /// Children of an `ERROR` node that the tree already got right.
-const COMPLETE: [&str; 7] =
-    ["class_declaration", "object_declaration", "companion_object", "type_alias", "enum_entry", "class_body", "enum_class_body"];
+const COMPLETE: [&str; 9] = [
+    "class_declaration",
+    "object_declaration",
+    "companion_object",
+    "type_alias",
+    "enum_entry",
+    "function_declaration",
+    "property_declaration",
+    "class_body",
+    "enum_class_body",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Tok<'a> {
@@ -23,6 +33,11 @@ enum Tok<'a> {
     LParen,
     RParen,
     ColonColon,
+    Colon,
+    Dot,
+    Eq,
+    Lt,
+    Gt,
 }
 
 pub(super) fn recover(sink: &mut DeclSink, node: Node, outer: Option<u32>) {
@@ -79,7 +94,14 @@ pub(super) fn recover(sink: &mut DeclSink, node: Node, outer: Option<u32>) {
                 let prev_word = i.checked_sub(1).and_then(word_at).map(|(w, _)| w);
                 let name = word_at(i + 1).filter(|(w, _)| !is_keyword(w));
                 match *word {
-                    "fun" | "val" | "var" | "init" | "constructor" => pending = None,
+                    "fun" | "val" | "var" => {
+                        pending = None;
+                        let kind = if *word == "fun" { DeclKind::Function } else { DeclKind::Property };
+                        if let Some(r) = declared_name(&tokens, i + 1) {
+                            sink.push_range(None, r, kind, container);
+                        }
+                    }
+                    "init" | "constructor" => pending = None,
                     "class" | "interface" if !after_colons => {
                         let kind = match (*word, prev_word) {
                             ("interface", _) => DeclKind::Interface,
@@ -111,11 +133,53 @@ pub(super) fn recover(sink: &mut DeclSink, node: Node, outer: Option<u32>) {
     }
 }
 
+/// The name after `fun`/`val`/`var` at `tokens[k..]`: `<T> a.B<X>.name` → `name`.
+/// `fun interface` and anonymous `fun (…)` have none.
+fn declared_name(tokens: &[(Tok, Range<usize>)], k: usize) -> Option<Range<usize>> {
+    let mut k = skip_angles(tokens, k);
+    let mut name = None;
+    while let Some((Tok::Word(word), range)) = tokens.get(k) {
+        if is_keyword(word) {
+            return None;
+        }
+        name = Some(range.clone());
+        k = skip_angles(tokens, k + 1);
+        if tokens.get(k).map(|t| t.0) != Some(Tok::Dot) {
+            break;
+        }
+        k += 1;
+    }
+    name
+}
+
+/// The index after a balanced `<…>` starting at `k`, or `k` if none starts there.
+fn skip_angles(tokens: &[(Tok, Range<usize>)], k: usize) -> usize {
+    if tokens.get(k).map(|t| t.0) != Some(Tok::Lt) {
+        return k;
+    }
+    let mut depth = 0;
+    for (j, (tok, _)) in tokens.iter().enumerate().skip(k) {
+        match tok {
+            Tok::Lt => depth += 1,
+            Tok::Gt => {
+                depth -= 1;
+                if depth == 0 {
+                    return j + 1;
+                }
+            }
+            Tok::Open | Tok::Close => return j,
+            _ => {}
+        }
+    }
+    tokens.len()
+}
+
 fn is_keyword(word: &str) -> bool {
     matches!(word, "class" | "interface" | "object" | "fun" | "val" | "var" | "typealias" | "companion")
 }
 
-/// Words, braces, parens and `::` of `text[region]`, skipping comments, strings and char literals.
+/// Words, braces, parens and `::` `:` `.` `=` `<` `>` of `text[region]` (`->` is skipped),
+/// skipping comments, strings and char literals.
 fn lex(text: &str, region: Range<usize>) -> Vec<(Tok<'_>, Range<usize>)> {
     let bytes = text.as_bytes();
     let end = region.end.min(bytes.len());
@@ -144,6 +208,8 @@ fn lex(text: &str, region: Range<usize>) -> Vec<(Tok<'_>, Range<usize>)> {
                 i += 1;
             }
             out.push((Tok::Word(&text[start..i]), start..i));
+        } else if rest.starts_with(b"->") {
+            i += 2;
         } else {
             let tok = match c {
                 b'{' => Some(Tok::Open),
@@ -151,6 +217,11 @@ fn lex(text: &str, region: Range<usize>) -> Vec<(Tok<'_>, Range<usize>)> {
                 b'(' => Some(Tok::LParen),
                 b')' => Some(Tok::RParen),
                 b':' if rest.starts_with(b"::") => Some(Tok::ColonColon),
+                b':' => Some(Tok::Colon),
+                b'.' => Some(Tok::Dot),
+                b'=' => Some(Tok::Eq),
+                b'<' => Some(Tok::Lt),
+                b'>' => Some(Tok::Gt),
                 _ => None,
             };
             let len = if tok == Some(Tok::ColonColon) { 2 } else { 1 };

@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use tree_sitter::{Node, Tree};
 
-use super::{DeclSink, dotted_text};
-use crate::model::{DeclKind, FileSummary, Import, Lang};
+use super::{DeclSink, dotted_text, named_child_of_kind, type_name};
+use crate::model::{DeclKind, FileSummary, Flags, Import, Lang};
 use crate::source_set::source_set_of;
 
 pub(crate) fn summarize(path: PathBuf, text: &str, tree: &Tree) -> FileSummary {
@@ -60,6 +60,14 @@ fn visit(sink: &mut DeclSink, node: Node, container: Option<u32>) {
             "interface_declaration" | "annotation_type_declaration" => DeclKind::Interface,
             "enum_declaration" => DeclKind::Enum,
             "enum_constant" => DeclKind::EnumEntry,
+            "method_declaration" => DeclKind::Function,
+            "field_declaration" => {
+                let mut c = child.walk();
+                for declarator in child.children_by_field_name("declarator", &mut c) {
+                    member(sink, child, declarator, container);
+                }
+                continue;
+            }
             "enum_body_declarations" | "ERROR" => {
                 visit(sink, child, container);
                 continue;
@@ -68,10 +76,49 @@ fn visit(sink: &mut DeclSink, node: Node, container: Option<u32>) {
         };
         let Some(name) = child.child_by_field_name("name") else { continue };
         let index = sink.push(name, None, kind, container);
-        if kind != DeclKind::EnumEntry {
+        sink.decls[index as usize].flags = flags(sink.text, child);
+        sink.decls[index as usize].supertypes = supertypes(sink.text, child);
+        if let Some(params) = child.child_by_field_name("parameters").filter(|_| child.kind() == "record_declaration") {
+            let mut c = params.walk();
+            for param in params.named_children(&mut c).filter(|p| p.kind() == "formal_parameter") {
+                member(sink, param, param, Some(index));
+            }
+        }
+        if !matches!(kind, DeclKind::EnumEntry | DeclKind::Function) {
             if let Some(body) = child.child_by_field_name("body") {
                 visit(sink, body, Some(index));
             }
         }
     }
+}
+
+/// A field declarator or record component: a `Property` typed by `typed`'s `type` field.
+fn member(sink: &mut DeclSink, typed: Node, named: Node, container: Option<u32>) {
+    let Some(name) = named.child_by_field_name("name") else { return };
+    let index = sink.push(name, None, DeclKind::Property, container) as usize;
+    sink.decls[index].type_hint = typed.child_by_field_name("type").and_then(|t| type_name(sink.text, t));
+    sink.decls[index].flags = flags(sink.text, typed);
+}
+
+fn flags(text: &str, node: Node) -> Flags {
+    let private = named_child_of_kind(node, "modifiers").is_some_and(|m| text[m.byte_range()].split_whitespace().any(|w| w == "private"));
+    if private { Flags::PRIVATE } else { Flags::default() }
+}
+
+/// `extends Base implements I, a.K<T>` → `Base`, `I`, `a.K`.
+fn supertypes(text: &str, node: Node) -> Vec<String> {
+    let mut cursor = node.walk();
+    let mut out = Vec::new();
+    for clause in node.named_children(&mut cursor) {
+        let list = match clause.kind() {
+            "superclass" => Some(clause),
+            "super_interfaces" | "extends_interfaces" => named_child_of_kind(clause, "type_list"),
+            _ => None,
+        };
+        if let Some(list) = list {
+            let mut c = list.walk();
+            out.extend(list.named_children(&mut c).filter_map(|t| type_name(text, t)));
+        }
+    }
+    out
 }
