@@ -98,6 +98,27 @@ fn overloads_share_their_calls() {
 }
 
 #[test]
+fn parameter_usages_include_the_labels_of_calls() {
+    assert_eq!(uses(REPO, 9, "limit", false), v(&["Usages.kt:11:14 E", "Repo.kt:9:43 E"]));
+    assert_eq!(uses(USAGES, 11, "limit", true), v(&["Usages.kt:11:14 E", "Repo.kt:9:13 E", "Repo.kt:9:43 E"]));
+}
+
+#[test]
+fn constructor_parameters_include_their_labels() {
+    let files = [("p/S.kt", "package p\nclass S(private val repo: Int, title: String) {\n  val label = title\n  fun f() = repo\n}\n"),
+                 ("q/U.kt", "package q\nimport p.S\nfun make() = S(repo = 1, title = \"t\")\n")];
+    assert_eq!(uses_in(&files, "p/S.kt", 1, "title", false), v(&["S.kt:2:14 E", "U.kt:2:25 E"]));
+    assert_eq!(uses_in(&files, "p/S.kt", 1, "repo", false), v(&["S.kt:3:12 E", "U.kt:2:15 E"]));
+}
+
+#[test]
+fn labels_of_a_function_named_like_its_parameter() {
+    let files = [("p/B.kt", "package p\nclass B {\n  fun title(title: String) = title\n}\n"),
+                 ("q/U.kt", "package q\nimport p.B\nfun use(b: B) = b.title(title = \"x\")\n")];
+    assert!(uses_in(&files, "p/B.kt", 2, "title:", false).contains(&"U.kt:2:24 E".to_string()));
+}
+
+#[test]
 fn a_set_flag_cancels_the_search() {
     let (index, _) = build_index(&[root()]);
     let sources = Sources::default();

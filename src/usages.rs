@@ -6,9 +6,11 @@ use rayon::prelude::*;
 use tree_sitter::{Node, Tree};
 
 use crate::cancel::{Cancel, Cancelled};
+use crate::docs::byte_offset;
 use crate::index::Index;
 use crate::model::{FileSummary, Flags, Span};
-use crate::parse::span_at;
+use crate::parse::{span_at, span_of};
+use crate::resolve::args::parameter_owner;
 use crate::resolve::family::family;
 use crate::resolve::rank::tier;
 use crate::resolve::{Certainty, Current, Found, Resolution, target_at};
@@ -72,16 +74,12 @@ pub fn references(
     cancel: &Cancel,
 ) -> Result<Vec<Usage>, Cancelled> {
     let Some(subject) = subject_at(index, current, sources, byte, cancel)? else { return Ok(Vec::new()) };
-    // On the pool of the caller: the request pool in the server.
-    let found: Vec<Vec<Usage>> = scope(index, current, &subject)
-        .par_iter()
-        .map(|path| usages_in(index, sources, path, &subject, cancel))
-        .collect::<Result<_, _>>()?;
+    let files = scope(index, current, sources, &subject, cancel)?;
     let declarations = subject.family.iter().map(|member| {
         let (path, range) = place(member);
         Usage { path: path.to_path_buf(), range, certainty: Certainty::Exact }
     });
-    let mut usages: Vec<Usage> = found.into_iter().flatten().chain(declarations).collect();
+    let mut usages: Vec<Usage> = search(index, sources, &files, &subject, cancel)?.into_iter().chain(declarations).collect();
     if !include_declaration {
         usages.retain(|u| !subject.targets.iter().any(|t| place(t) == (u.path.as_path(), u.range)));
     }
@@ -91,9 +89,35 @@ pub fn references(
     Ok(usages)
 }
 
+/// Usages of `subject` in `files`, a file per task on the pool of the caller: the request
+/// pool in the server.
+fn search(index: &Index, sources: &Sources, files: &[PathBuf], subject: &Subject, cancel: &Cancel) -> Result<Vec<Usage>, Cancelled> {
+    let found: Vec<Vec<Usage>> =
+        files.par_iter().map(|path| usages_in(index, sources, path, subject, cancel)).collect::<Result<_, _>>()?;
+    Ok(found.into_iter().flatten().collect())
+}
+
+/// The files a usage of the family may be in: those its visibility allows and, for a
+/// parameter, the files that use its function or class, where the `name =` labels are.
+fn scope(index: &Index, current: &Current, sources: &Sources, subject: &Subject, cancel: &Cancel) -> Result<Vec<PathBuf>, Cancelled> {
+    let (mut files, all) = visible_scope(index, current, subject);
+    if all {
+        return Ok(files);
+    }
+    for member in &subject.family {
+        let Some(owner) = owner_of(index, current, sources, member, cancel)? else { continue };
+        let calls = search(index, sources, &visible_scope(index, current, &owner).0, &owner, cancel)?;
+        files.extend(calls.into_iter().map(|u| u.path));
+    }
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
 /// The indexed files and the current one that a usage of a family member may be in:
-/// a `private` member's file, an `internal` one's module, a local's file, else all.
-fn scope(index: &Index, current: &Current, subject: &Subject) -> Vec<PathBuf> {
+/// a `private` member's file, an `internal` one's module, a local's file, else all; and
+/// whether that is every file.
+fn visible_scope(index: &Index, current: &Current, subject: &Subject) -> (Vec<PathBuf>, bool) {
     let mut files: Vec<(&Path, Option<&Path>)> = index.files().map(|f| (f.path.as_path(), f.module.as_deref())).collect();
     if index.file(&current.summary.path).is_none() {
         files.push((&current.summary.path, current.summary.module.as_deref()));
@@ -108,7 +132,34 @@ fn scope(index: &Index, current: &Current, subject: &Subject) -> Vec<PathBuf> {
             Found::Decl(_) => true,
         })
     };
-    files.into_iter().filter(|&(path, module)| wanted(path, module)).map(|(path, _)| path.to_path_buf()).collect()
+    let total = files.len();
+    let kept: Vec<PathBuf> = files.into_iter().filter(|&(path, module)| wanted(path, module)).map(|(path, _)| path.to_path_buf()).collect();
+    let all = kept.len() == total;
+    (kept, all)
+}
+
+/// The function or class whose parameter `member` is, as a subject: its usages hold the
+/// calls the parameter's labels are in. `None` for anything else, and for a local function
+/// or class, whose calls are in the parameter's own file. The owner is looked up by place,
+/// not resolved by name: in `fun title(title: String)` the name resolves to the parameter.
+fn owner_of<'a>(index: &'a Index, current: &Current<'a>, sources: &Sources, member: &Found, cancel: &Cancel) -> Result<Option<Subject<'a>>, Cancelled> {
+    let (path, range) = place(member);
+    let here = path == current.summary.path;
+    let loaded;
+    let (text, tree) = if here {
+        (current.text, current.tree)
+    } else {
+        let Some(doc) = sources.load(path) else { return Ok(None) };
+        loaded = doc;
+        (loaded.text.as_str(), &loaded.tree)
+    };
+    let name = byte_offset(text, range.line, range.start).and_then(|b| tree.root_node().descendant_for_byte_range(b, b));
+    let Some(owner) = name.and_then(parameter_owner) else { return Ok(None) };
+    let span = span_of(text, owner);
+    let summary = if here { Some(current.summary) } else { index.file(path) };
+    let Some(decl) = summary.and_then(|f| f.decls.iter().find(|d| d.name_range == span).map(|d| (f, d))) else { return Ok(None) };
+    let family = family(index, decl, cancel)?.into_iter().map(Found::Decl).collect();
+    Ok(Some(Subject { name: decl.1.name.clone(), targets: vec![Found::Decl(decl)], family }))
 }
 
 /// Usages of `subject` in the file at `path`: its occurrences of the name that the
