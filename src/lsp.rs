@@ -5,9 +5,9 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
@@ -15,11 +15,12 @@ use lsp_types::notification::{
     Notification as _,
 };
 use lsp_types::request::{
-    DocumentHighlightRequest, GotoDefinition, GotoImplementation, GotoTypeDefinition, References, Request as _,
+    CodeActionRequest, DocumentHighlightRequest, ExecuteCommand, GotoDefinition, GotoImplementation, GotoTypeDefinition, References, Request as _,
     WorkspaceSymbolRequest,
 };
 use lsp_types::{
-    CancelParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, GotoDefinitionParams,
+    CancelParams, CodeAction, CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability, Command,
+    ExecuteCommandOptions, ExecuteCommandParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, GotoDefinitionParams,
     GotoDefinitionResponse, ImplementationProviderCapability, Location, NumberOrString, OneOf, Position, Range,
     ReferenceParams, ServerCapabilities, SymbolInformation, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind,
     TypeDefinitionProviderCapability, WorkspaceSymbolParams, WorkspaceSymbolResponse,
@@ -30,17 +31,24 @@ use tree_sitter::Tree;
 use crate::cancel::{Cancel, Cancelled};
 use crate::docs::{self, Documents, OpenDoc, path_to_uri, uri_to_path};
 use crate::index::Index;
+use crate::library::{self, Library};
 use crate::model::{Decl, DeclKind, FileSummary, Span};
 use crate::sources::Sources;
 use crate::{highlight, parse, resolve, scan, usages};
 
 pub const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_SYMBOLS: usize = 100;
+/// Adds the library of an extracted file to the current Zed project: `[uri, line]`, the line 0-based.
+pub const OPEN_LIBRARY: &str = "kotlin-navigator.openLibrary";
+/// The Zed CLI answers once Zed has opened the paths; a hung one must not hold a request.
+const ZED_CLI_TIMEOUT: Duration = Duration::from_secs(10);
 pub const REQUEST_THREADS: usize = 4;
 
 pub struct State {
     pub index: RwLock<Index>,
     pub docs: RwLock<Documents>,
+    /// Library sources, set once their scan ends.
+    pub library: OnceLock<Library>,
     roots: Vec<PathBuf>,
     ready: Mutex<bool>,
     ready_changed: Condvar,
@@ -50,6 +58,8 @@ pub struct State {
     /// Live updates (including deletions) take precedence over the initial scan.
     /// Lock order: docs, updated, index.
     updated: Mutex<HashSet<PathBuf>>,
+    /// Library folders added to the editor's project this session.
+    shown: Mutex<HashSet<PathBuf>>,
 }
 
 impl State {
@@ -57,12 +67,14 @@ impl State {
         Arc::new(State {
             index: RwLock::default(),
             docs: RwLock::default(),
+            library: OnceLock::new(),
             roots,
             ready: Mutex::new(false),
             ready_changed: Condvar::new(),
             ready_timeout,
             requests: Mutex::default(),
             updated: Mutex::default(),
+            shown: Mutex::default(),
         })
     }
 
@@ -218,7 +230,21 @@ pub fn definition(state: &State, path: &Path, position: Position) -> Vec<Locatio
     let (sources, index) = snapshot(state, |index| index);
     let Some((doc, byte)) = cursor(&sources, path, position) else { return Vec::new() };
     let current = resolve::Current::of(&index, &doc);
-    locations(resolve::definition(&index, &current, &sources, byte))
+    let found = resolve::definition(&index, &current, &sources, byte);
+    if !found.is_empty() {
+        return locations(found);
+    }
+    let Some(library) = state.library.get() else { return Vec::new() };
+    let found = library::candidates(&current, byte).iter().find_map(|fqn| library.find(fqn));
+    // Before answering: the editor then opens the file from the library folder, as a file of
+    // the project the project panel shows. Opened first, it would stay a file of its own.
+    if let Some(target) = &found
+        && let Some(folder) = library.folder_of(&target.path)
+        && state.shown.lock().unwrap_or_else(PoisonError::into_inner).insert(folder)
+    {
+        open_library(state, &target.path, None);
+    }
+    locations(found.into_iter().collect())
 }
 
 /// Usages of the symbol at `position`. The search runs on a copy of the index, so no lock
@@ -267,6 +293,53 @@ pub fn highlight(state: &State, path: &Path, position: Position) -> Vec<Document
             kind: Some(if h.write { DocumentHighlightKind::WRITE } else { DocumentHighlightKind::READ }),
         })
         .collect()
+}
+
+/// In a file extracted from a library jar, the action that opens the whole library.
+pub fn code_actions(state: &State, path: &Path, line: u32) -> Vec<CodeActionOrCommand> {
+    let Some(folder) = state.library.get().and_then(|library| library.folder_of(path)) else { return Vec::new() };
+    let name = folder.file_name().unwrap_or_default().to_string_lossy();
+    let title = format!("Show library {name} in the project panel");
+    let command = Command {
+        title: title.clone(),
+        command: OPEN_LIBRARY.to_string(),
+        arguments: Some(vec![json!(path_to_uri(path)), json!(line)]),
+    };
+    vec![CodeActionOrCommand::CodeAction(CodeAction { title, command: Some(command), ..CodeAction::default() })]
+}
+
+/// Extracts the rest of the library `path` belongs to and adds its folder to the current
+/// Zed project, where the project panel lists its files; with `line` (0-based), `path` is
+/// opened there too. Returns once Zed has the paths.
+pub fn open_library(state: &State, path: &Path, line: Option<u32>) {
+    let Some(folder) = state.library.get().and_then(|library| library.extract_all(path)) else { return };
+    let Some(cli) = zed_cli() else {
+        log::warn!("no Zed CLI: set ZED_CLI, or put `zed` on PATH");
+        return;
+    };
+    let mut command = std::process::Command::new(&cli);
+    // -a adds to the project that holds one of the paths, else to an arbitrary one of the
+    // window's projects: the roots name this server's project.
+    command.arg("-a").args(&state.roots).arg(&folder);
+    if let Some(line) = line {
+        command.arg(format!("{}:{}", path.display(), line + 1));
+    }
+    if scan::output_within(&mut command, ZED_CLI_TIMEOUT).is_none() {
+        log::warn!("{} failed or took over {} s", cli.display(), ZED_CLI_TIMEOUT.as_secs());
+    }
+}
+
+/// `$ZED_CLI`, else `zed` on PATH, else the CLI inside Zed.app.
+fn zed_cli() -> Option<PathBuf> {
+    let on_path = || std::env::split_paths(&std::env::var_os("PATH")?).map(|dir| dir.join("zed")).find(|p| p.is_file());
+    let bundled = || {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        [PathBuf::from("/Applications"), home.join("Applications")]
+            .into_iter()
+            .map(|dir| dir.join("Zed.app/Contents/MacOS/cli"))
+            .find(|p| p.is_file())
+    };
+    std::env::var_os("ZED_CLI").map(PathBuf::from).or_else(on_path).or_else(bundled)
 }
 
 fn locations(targets: Vec<resolve::Target>) -> Vec<Location> {
@@ -339,6 +412,11 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
         implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
         type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+        execute_command_provider: Some(ExecuteCommandOptions {
+            commands: vec![OPEN_LIBRARY.to_string()],
+            ..ExecuteCommandOptions::default()
+        }),
         ..ServerCapabilities::default()
     };
     connection.initialize_finish(
@@ -350,6 +428,7 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
     )?;
 
     let state = State::new(roots.clone(), READY_TIMEOUT);
+    let library_roots = roots.clone();
     index_in_background(Arc::clone(&state), move |publish| {
         let stats = scan::build_index_with(&roots, publish);
         log::info!(
@@ -361,6 +440,19 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
             stats.elapsed.as_millis()
         );
     });
+
+    let library_state = Arc::clone(&state);
+    std::thread::Builder::new().name("library".into()).spawn(move || {
+        let started = Instant::now();
+        let library = Library::scan(&library_roots);
+        log::info!(
+            "library sources: {} jars, {} packages in {} ms",
+            library.jar_count(),
+            library.package_count(),
+            started.elapsed().as_millis()
+        );
+        let _ = library_state.library.set(library);
+    })?;
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(REQUEST_THREADS)
@@ -489,6 +581,27 @@ fn dispatch(state: &State, request: Request, cancel: &Cancel) -> Response {
                     .unwrap_or_default();
                 Response::new_ok(id, Some(highlights))
             }
+            Err(error) => invalid_params(id, error),
+        },
+        CodeActionRequest::METHOD => match serde_json::from_value::<CodeActionParams>(request.params) {
+            Ok(params) => {
+                let actions = uri_to_path(&params.text_document.uri)
+                    .map(|path| code_actions(state, &path, params.range.start.line))
+                    .unwrap_or_default();
+                Response::new_ok(id, Some(actions))
+            }
+            Err(error) => invalid_params(id, error),
+        },
+        ExecuteCommand::METHOD => match serde_json::from_value::<ExecuteCommandParams>(request.params) {
+            Ok(params) if params.command == OPEN_LIBRARY => {
+                let uri = params.arguments.first().and_then(|a| serde_json::from_value::<lsp_types::Uri>(a.clone()).ok());
+                let line = params.arguments.get(1).and_then(Value::as_u64).unwrap_or(0) as u32;
+                if let Some(path) = uri.as_ref().and_then(uri_to_path) {
+                    open_library(state, &path, Some(line));
+                }
+                Response::new_ok(id, Value::Null)
+            }
+            Ok(params) => Response::new_err(id, ErrorCode::InvalidParams as i32, format!("unknown command: {}", params.command)),
             Err(error) => invalid_params(id, error),
         },
         method => Response::new_err(id, ErrorCode::MethodNotFound as i32, format!("unsupported request: {method}")),

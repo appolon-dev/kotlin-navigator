@@ -19,6 +19,7 @@ anyhow = "1"
 log = "0.4"
 url = "2.5"
 libc = "0.2"
+zip = { version = "3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
 tempfile = "3"

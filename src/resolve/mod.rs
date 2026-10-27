@@ -395,6 +395,6 @@ pub(crate) fn by_fqn<'a>(index: &'a Index, fqn: &str) -> Vec<DeclRef<'a>> {
     index.lookup(name).into_iter().filter(|(_, d)| d.fqn == fqn).collect()
 }
 
-fn import_key(import: &Import) -> &str {
+pub(crate) fn import_key(import: &Import) -> &str {
     import.alias.as_deref().unwrap_or_else(|| import.path.rsplit('.').next().unwrap_or(&import.path))
 }
